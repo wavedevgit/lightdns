@@ -38,6 +38,8 @@ dig @127.0.0.1 -p 1053 example.com A
 
 The state file overrides the base config after dashboard changes are saved.
 
+Set `upstreams: []` to answer only custom DNS records. Unknown names return `NXDOMAIN`.
+
 ## Build
 
 ```sh

@@ -136,8 +136,8 @@ func Load(path string) (Config, error) {
 
 func (c *Config) Validate() error {
 	var err error
-	if c.Listen == "" || len(c.Upstreams) == 0 {
-		return errors.New("listen and at least one upstream are required")
+	if c.Listen == "" {
+		return errors.New("listen is required")
 	}
 	c.Timeout, err = parseDuration("timeout", c.TimeoutText)
 	if err != nil {

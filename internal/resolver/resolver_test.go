@@ -103,6 +103,35 @@ func TestForwardCacheAndBlock(t *testing.T) {
 	}
 }
 
+func TestLocalOnlyMode(t *testing.T) {
+	r, err := New(Options{
+		Blocklists: blocklist.NewStore(blocklist.New(nil, nil)),
+		Cache:      cache.New(100, time.Second, time.Hour),
+		Timeout:    time.Second, MaxQuestions: 1, BlockMode: "nxdomain",
+		BlockIPv4: "0.0.0.0", BlockIPv6: "::",
+		Records: []records.Record{{Name: "local.example", Type: "A", Value: "192.0.2.25", TTL: 300}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	local := new(dns.Msg)
+	local.SetQuestion("local.example.", dns.TypeA)
+	writer := &captureWriter{}
+	r.ServeDNS(writer, local)
+	if writer.message == nil || !writer.message.Authoritative || writer.message.Rcode != dns.RcodeSuccess || len(writer.message.Answer) != 1 {
+		t.Fatalf("unexpected local-only record response: %#v", writer.message)
+	}
+
+	unknown := new(dns.Msg)
+	unknown.SetQuestion("unknown.example.", dns.TypeA)
+	writer = &captureWriter{}
+	r.ServeDNS(writer, unknown)
+	if writer.message == nil || !writer.message.Authoritative || writer.message.Rcode != dns.RcodeNameError || len(writer.message.Answer) != 0 {
+		t.Fatalf("unexpected local-only unknown response: %#v", writer.message)
+	}
+}
+
 func TestExchangeDoH(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Content-Type") != "application/dns-message" {

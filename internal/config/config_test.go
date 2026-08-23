@@ -34,3 +34,11 @@ func TestResolverCIDRsAreNotRequired(t *testing.T) {
 		t.Fatalf("configuration without a resolver ACL was rejected: %v", err)
 	}
 }
+
+func TestUpstreamsAreOptional(t *testing.T) {
+	cfg := Default()
+	cfg.Upstreams = nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("local-only configuration was rejected: %v", err)
+	}
+}

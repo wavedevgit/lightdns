@@ -73,9 +73,6 @@ func New(options Options) (*Resolver, error) {
 	if options.Blocklists == nil || options.Cache == nil {
 		return nil, fmt.Errorf("blocklist store and cache are required")
 	}
-	if len(options.Upstreams) == 0 {
-		return nil, fmt.Errorf("at least one upstream is required")
-	}
 	r := &Resolver{blocklists: options.Blocklists}
 	if err := r.Update(options); err != nil {
 		return nil, err
@@ -84,8 +81,8 @@ func New(options Options) (*Resolver, error) {
 }
 
 func (r *Resolver) Update(options Options) error {
-	if options.Cache == nil || len(options.Upstreams) == 0 {
-		return fmt.Errorf("cache and at least one upstream are required")
+	if options.Cache == nil {
+		return fmt.Errorf("cache is required")
 	}
 	localRecords, err := records.New(options.Records)
 	if err != nil {
@@ -145,6 +142,14 @@ func (r *Resolver) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	if r.blocklists.Blocked(q.Name) {
 		r.Metrics.Blocked.Add(1)
 		r.writeBlocked(w, req, state)
+		return
+	}
+	if len(state.upstreams) == 0 {
+		response := new(dns.Msg)
+		response.SetReply(req)
+		response.Authoritative = true
+		response.Rcode = dns.RcodeNameError
+		_ = w.WriteMsg(response)
 		return
 	}
 	if state.dnssec {
