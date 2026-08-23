@@ -7,6 +7,9 @@ LightDNS is a small, production-oriented DNS blocker and local DNS manager. It s
 For a packaged Linux release:
 
 ```sh
+wget https://github.com/wavedevgit/lightdns/releases/download/v1/lightdns-linux-amd64.tar.gz
+wget https://github.com/wavedevgit/lightdns/releases/download/v1/lightdns-linux-amd64.tar.gz.sha256
+sha256sum -c lightdns-linux-amd64.tar.gz.sha256
 tar -xzf lightdns-linux-amd64.tar.gz
 cd lightdns-linux-amd64
 sudo ./install.sh
