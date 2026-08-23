@@ -7,8 +7,8 @@ A small DNS blocker, cache, and local record manager with a web dashboard.
 ## Install
 
 ```sh
-wget https://github.com/wavedevgit/lightdns/releases/download/v1.0.1/lightdns-linux-amd64.tar.gz
-wget https://github.com/wavedevgit/lightdns/releases/download/v1.0.1/lightdns-linux-amd64.tar.gz.sha256
+wget https://github.com/wavedevgit/lightdns/releases/download/v1.1.0/lightdns-linux-amd64.tar.gz
+wget https://github.com/wavedevgit/lightdns/releases/download/v1.1.0/lightdns-linux-amd64.tar.gz.sha256
 sha256sum -c lightdns-linux-amd64.tar.gz.sha256
 tar -xzf lightdns-linux-amd64.tar.gz
 cd lightdns-linux-amd64
