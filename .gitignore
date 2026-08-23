@@ -1,0 +1,10 @@
+/lightdns
+/lightdns.zip
+/dist/
+*.state.yaml
+.env
+.env.*
+*.pem
+*.key
+*.crt
+coverage.out

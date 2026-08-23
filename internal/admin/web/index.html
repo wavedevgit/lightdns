@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>LightDNS control</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23f6821f' d='M3 18h6v11H3zm10-15h6v26h-6zm10 8h6v18h-6z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/pico.min.css">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <!--
+  THESIS: A dense DNS operations console puts records and controls first, refusing metric-card dashboard filler.
+  OWN-WORLD: Near-black workspace, layered charcoal structure, cool gray type, blue actions, compact data tables.
+  STORY: Check resolver health, manage records, then configure filtering, forwarding, and encrypted listeners.
+  FIRST VIEWPORT: A quiet global mast, full-height navigation, compact toolbar, and dense records table.
+  FORM: Operate-mode control surface; dense infrastructure console; seed key lightdns-routing-ledger.
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+  -->
+  <div id="app" class="app-shell">
+    <header class="masthead">
+      <a class="brand" href="#overview" aria-label="LightDNS overview">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13h4v8H3v-8Zm7-10h4v18h-4V3Zm7 6h4v12h-4V9Z"/></svg>
+      </a>
+      <div class="service-state"><span></span> Resolver online</div>
+    </header>
+
+    <aside class="route-rail" aria-label="Configuration sections">
+      <nav>
+        <button data-view="overview" class="active" aria-label="Overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-3H4v3Zm10 0h6v-9h-6v9Zm0-16v3h6V4h-6Z"/></svg><span class="nav-label">Overview</span></button>
+        <button data-view="records" aria-label="DNS records"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v4H5V5Zm0 10h14v4H5v-4Zm3-6v6m8-6v6"/></svg><span class="nav-label">DNS records</span></button>
+        <button data-view="blocking" aria-label="Blocking"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.9 7.9 7 10 4.1-2.1 7-5.4 7-10V6l-7-3Zm-3 6 6 6m0-6-6 6"/></svg><span class="nav-label">Blocking</span></button>
+        <button data-view="upstreams" aria-label="Upstreams"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M12 7.5v4m0 0H5v4m7-4h7v4"/></svg><span class="nav-label">Upstreams</span></button>
+        <button data-view="system" aria-label="System"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1A7 7 0 0 0 15 6.2L14.7 4h-5.4L9 6.2a7 7 0 0 0-1.5.9l-2.4-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 1.5.9l.3 2.2h5.4l.3-2.2a7 7 0 0 0 1.5-.9l2.4 1 2-3.4-2-1.5a7 7 0 0 0 .1-1Z"/></svg><span class="nav-label">System</span></button>
+      </nav>
+      <button id="logout" class="quiet-button" aria-label="Lock dashboard"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span class="nav-label">Lock dashboard</span></button>
+    </aside>
+
+    <main>
+      <section id="view-overview" class="view active">
+        <div class="section-heading">
+          <h1>Overview</h1>
+          <time id="stats-time">Waiting for data</time>
+        </div>
+        <dl class="query-ledger">
+          <div><dt>Queries</dt><dd id="stat-queries">0</dd></div>
+          <div><dt>Blocked</dt><dd id="stat-blocked">0</dd></div>
+          <div><dt>Local answers</dt><dd id="stat-local">0</dd></div>
+          <div><dt>Cache hit rate</dt><dd id="stat-cache">0%</dd></div>
+        </dl>
+        <div class="flow-report">
+          <h2>Request path</h2>
+          <div class="flow-row"><span>Known blocked domains</span><strong id="stat-domains">0</strong></div>
+          <div class="flow-row"><span>Cache misses</span><strong id="stat-misses">0</strong></div>
+          <div class="flow-row"><span>Upstream errors</span><strong id="stat-errors">0</strong></div>
+          <div class="flow-row"><span>SERVFAIL responses</span><strong id="stat-servfail">0</strong></div>
+        </div>
+      </section>
+
+      <section id="view-records" class="view">
+        <div class="section-heading">
+          <h1>DNS records</h1>
+        </div>
+        <div class="records-toolbar">
+          <input id="record-search" type="search" placeholder="Search records" aria-label="Search records">
+          <details id="record-type-filter" class="filter-dropdown custom-dropdown">
+            <summary><span id="record-type-label">All types</span><svg class="dropdown-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></summary>
+            <div class="filter-menu" role="listbox" aria-label="Filter by record type">
+              <button type="button" data-record-type="">All types</button><button type="button" data-record-type="A">A</button><button type="button" data-record-type="AAAA">AAAA</button><button type="button" data-record-type="CNAME">CNAME</button><button type="button" data-record-type="MX">MX</button><button type="button" data-record-type="TXT">TXT</button><button type="button" data-record-type="NS">NS</button><button type="button" data-record-type="PTR">PTR</button><button type="button" data-record-type="SRV">SRV</button><button type="button" data-record-type="CAA">CAA</button>
+            </div>
+          </details>
+          <small id="record-count">0 records</small>
+          <button id="add-record">Add record</button>
+        </div>
+        <div class="table-wrap">
+          <table class="record-table">
+            <colgroup><col class="record-name-column"><col class="record-type-column"><col class="record-value-column"><col class="record-ttl-column"><col class="record-action-column"></colgroup>
+            <thead><tr><th>Name</th><th>Type</th><th>Value</th><th>TTL</th><th aria-label="Action"></th></tr></thead>
+            <tbody id="record-rows"></tbody>
+          </table>
+          <p id="records-empty" class="empty-state">No matching records.</p>
+        </div>
+      </section>
+
+      <section id="view-blocking" class="view config-view">
+        <div class="section-heading">
+          <h1>Blocking</h1>
+          <button id="reload-lists" class="secondary">Reload lists</button>
+        </div>
+        <section class="settings-section">
+          <h2>List sources</h2>
+          <label>Blocklist URLs <textarea id="block-urls" rows="4" placeholder="https://raw.githubusercontent.com/user/repository/main/hosts"></textarea><small>One URL per line. Accepts raw GitHub, Pi-hole hosts, domain, and Adblock lists.</small></label>
+          <label>Local files <textarea id="block-files" rows="2" placeholder="/etc/lightdns/blocklist.txt"></textarea></label>
+          <div class="form-grid compact"><label>Refresh interval <input id="block-refresh" value="24h"></label><label>Maximum source bytes <input id="block-bytes" type="number" min="1"></label></div>
+        </section>
+        <section class="settings-section">
+          <h2>Domain rules</h2>
+          <div class="form-grid"><label>Always block <textarea id="denylist" rows="4" placeholder="ads.example.com"></textarea></label><label>Always allow <textarea id="allowlist" rows="4" placeholder="safe.example.com"></textarea></label></div>
+        </section>
+        <section class="settings-section">
+          <h2>Response</h2>
+          <div class="form-grid three-column">
+            <label>Blocked response
+              <details id="block-mode-dropdown" class="form-dropdown custom-dropdown">
+                <summary><span>NXDOMAIN</span><svg class="dropdown-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></summary>
+                <div class="form-dropdown-menu" role="listbox"><button type="button" data-dropdown-value="nxdomain">NXDOMAIN</button><button type="button" data-dropdown-value="null">Null address</button></div>
+              </details>
+              <input id="block-mode" data-dropdown-input type="hidden" value="nxdomain">
+            </label>
+            <label>Null IPv4 <input id="block-ipv4" value="0.0.0.0"></label>
+            <label>Null IPv6 <input id="block-ipv6" value="::"></label>
+          </div>
+        </section>
+      </section>
+
+      <section id="view-upstreams" class="view config-view">
+        <div class="section-heading"><h1>Upstreams</h1></div>
+        <label>Resolver addresses
+          <textarea id="upstream-list" rows="7" placeholder="https://cloudflare-dns.com/dns-query"></textarea>
+          <small>Use a DoH URL, or <code>udp://</code>, <code>tcp://</code>, or <code>tcp-tls://</code> with a port.</small>
+        </label>
+        <div class="form-grid compact">
+          <label>Query timeout <input id="timeout" value="2s"></label>
+          <label>Questions per message <input id="max-questions" type="number" min="1"></label>
+        </div>
+        <label class="checkbox-row"><input id="dnssec" type="checkbox"> Request DNSSEC proofs</label>
+        <p class="field-note">DNSSEC authenticates records but does not encrypt queries. Use a DoH URL or <code>tcp-tls://</code> upstream for encryption.</p>
+      </section>
+
+      <section id="view-system" class="view config-view">
+        <div class="section-heading"><h1>System</h1></div>
+        <h2>Listeners</h2>
+        <div class="form-grid compact">
+          <label>DNS listen address <input id="dns-listen" placeholder=":53"></label>
+          <label>Dashboard listen address <input id="http-listen" placeholder=":8080"></label>
+        </div>
+        <h2>Encrypted DNS</h2>
+        <div class="form-grid three-column">
+          <label>TLS certificate file <input id="tls-cert" placeholder="/etc/lightdns/tls/fullchain.pem"></label>
+          <label>TLS private key file <input id="tls-key" placeholder="/etc/lightdns/tls/privkey.pem"></label>
+          <label>DNS-over-TLS listen address <input id="dot-listen" placeholder=":853"></label>
+        </div>
+        <p class="field-note">A certificate enables HTTPS for the dashboard and <code>/dns-query</code>. Set the DoT address to offer encrypted DNS on port 853. Listener changes require a restart.</p>
+        <h2>Cache</h2>
+        <div class="form-grid three-column">
+          <label>Maximum entries <input id="cache-entries" type="number" min="0"></label>
+          <label>Minimum TTL <input id="cache-min" value="5s"></label>
+          <label>Maximum TTL <input id="cache-max" value="1h"></label>
+        </div>
+        <h2>Access</h2>
+        <label>Replace admin token
+          <input id="admin-token" type="password" autocomplete="new-password" placeholder="Leave blank to keep the current token">
+        </label>
+      </section>
+    </main>
+  </div>
+
+  <div id="unsaved-bar" class="unsaved-bar" role="status" hidden>
+    <span id="unsaved-message">You have unsaved changes.</span>
+    <div class="unsaved-actions">
+      <button id="reset-changes" type="button" class="quiet-action">Reset</button>
+      <button id="save" type="button">Save changes</button>
+    </div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="record-dialog">
+    <article>
+      <header><button id="cancel-record" type="button" aria-label="Close" rel="prev"></button><h2>Add DNS record</h2></header>
+      <form id="record-form">
+        <div class="record-form-grid">
+          <label>Name <input id="new-record-name" placeholder="host.example.com" required></label>
+          <label>Type
+            <details id="new-record-type-dropdown" class="form-dropdown custom-dropdown">
+              <summary><span>A</span><svg class="dropdown-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></summary>
+              <div class="form-dropdown-menu" role="listbox"><button type="button" data-dropdown-value="A">A</button><button type="button" data-dropdown-value="AAAA">AAAA</button><button type="button" data-dropdown-value="CNAME">CNAME</button><button type="button" data-dropdown-value="MX">MX</button><button type="button" data-dropdown-value="TXT">TXT</button><button type="button" data-dropdown-value="NS">NS</button><button type="button" data-dropdown-value="PTR">PTR</button><button type="button" data-dropdown-value="SRV">SRV</button><button type="button" data-dropdown-value="CAA">CAA</button></div>
+            </details>
+            <input id="new-record-type" data-dropdown-input type="hidden" value="A">
+          </label>
+          <label class="record-value">Value <input id="new-record-value" placeholder="192.0.2.10" required><small id="record-value-help">IPv4 address</small></label>
+          <label>TTL <input id="new-record-ttl" type="number" min="1" value="300" required></label>
+        </div>
+        <footer><button id="cancel-record-footer" type="button" class="secondary">Cancel</button><button type="submit">Add record</button></footer>
+      </form>
+    </article>
+  </dialog>
+  <dialog id="remove-record-dialog" class="confirm-dialog">
+    <article>
+      <h2>Remove DNS record?</h2>
+      <p>This record will be removed after you save your changes.</p>
+      <footer><button id="cancel-remove-record" type="button" class="secondary">Cancel</button><button id="confirm-remove-record" type="button" class="danger-button">Remove record</button></footer>
+    </article>
+  </dialog>
+  <template id="record-template">
+    <tr class="record-row">
+      <td><input data-field="name" aria-label="Record name" placeholder="example.com"></td>
+      <td>
+        <details class="record-type-dropdown custom-dropdown">
+          <summary aria-label="Record type"><span>A</span><svg class="dropdown-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></summary>
+          <div class="record-type-menu" role="listbox" aria-label="Choose record type"></div>
+        </details>
+        <input class="record-type-value" data-field="type" type="hidden" value="A">
+      </td>
+      <td><input data-field="value" aria-label="Record value" placeholder="192.0.2.10"></td>
+      <td><input data-field="ttl" aria-label="Record TTL" type="number" min="1" value="300"></td>
+      <td><button class="remove-record outline secondary" aria-label="Remove record">Remove</button></td>
+    </tr>
+  </template>
+  <script src="/app.js" defer></script>
+</body>
+</html>

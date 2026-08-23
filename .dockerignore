@@ -1,0 +1,10 @@
+.git
+lightdns
+*.md
+*.state.yaml
+dist
+*.zip
+.env*
+*.pem
+*.key
+*.crt

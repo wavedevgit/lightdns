@@ -1,0 +1,60 @@
+listen: "0.0.0.0:53"
+http_listen: "127.0.0.1:8080"
+
+upstreams:
+  - "https://cloudflare-dns.com/dns-query"
+  - "tcp-tls://dns.quad9.net:853"
+timeout: "2s"
+max_questions: 1
+dnssec: true
+
+tls:
+  # Add a certificate and key to serve the dashboard and /dns-query over HTTPS.
+  cert_file: ""
+  key_file: ""
+  # Set to ":853" to enable inbound DNS-over-TLS.
+  dot_listen: ""
+
+admin:
+  # Set a memorable constant of at least 8 characters and keep this file private.
+  token: ""
+  allow_insecure_http: false
+
+access:
+  # Restrict public listeners with the host or provider firewall.
+  queries_per_second: 200
+  burst: 400
+  max_in_flight: 1024
+
+cache:
+  entries: 100000
+  min_ttl: "5s"
+  max_ttl: "1h"
+
+blocking:
+  mode: "nxdomain" # nxdomain or null
+  ipv4: "0.0.0.0"
+  ipv6: "::"
+  denylist:
+    - "telemetry.example"
+  allowlist:
+    - "example.org"
+
+blocklists:
+  files: []
+  # Local files are rejected unless they are beneath one of these roots.
+  file_roots: []
+  urls:
+    - "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+  refresh: "24h"
+  max_download_bytes: 52428800
+
+records:
+  - name: "router.home.example"
+    type: "A"
+    value: "192.168.1.1"
+    ttl: 300
+  - name: "home.example"
+    type: "MX"
+    value: "10 mail.home.example."
+    ttl: 300

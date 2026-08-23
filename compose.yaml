@@ -1,0 +1,25 @@
+services:
+  lightdns:
+    build: .
+    command: ["-config", "/etc/lightdns/config.yaml", "-state", "/var/lib/lightdns/config.yaml"]
+    restart: unless-stopped
+    environment:
+      LIGHTDNS_ADMIN_TOKEN: "${LIGHTDNS_ADMIN_TOKEN:?set LIGHTDNS_ADMIN_TOKEN to at least 8 characters}"
+      LIGHTDNS_HTTP_LISTEN: ":8080"
+      # Safe only because port 8080 is published on host loopback below.
+      LIGHTDNS_ALLOW_INSECURE_HTTP: "true"
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "127.0.0.1:8080:8080/tcp"
+    volumes:
+      - "./config.example.yaml:/etc/lightdns/config.yaml:ro"
+      - "lightdns-state:/var/lib/lightdns"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+
+volumes:
+  lightdns-state:
