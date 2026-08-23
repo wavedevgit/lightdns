@@ -2,6 +2,8 @@
 
 A small DNS blocker, cache, and local record manager with a web dashboard.
 
+![LightDNS dashboard](docs/dashboard.png)
+
 ## Install
 
 ```sh
