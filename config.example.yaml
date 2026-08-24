@@ -16,8 +16,6 @@ tls:
   dot_listen: ""
 
 admin:
-  # Set a memorable constant of at least 8 characters and keep this file private.
-  token: ""
   allow_insecure_http: false
 
 access:

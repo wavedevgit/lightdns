@@ -1,0 +1,35 @@
+listen: "0.0.0.0:53"
+http_listen: ":8080"
+upstreams:
+  - "https://cloudflare-dns.com/dns-query"
+  - "tcp-tls://dns.quad9.net:853"
+timeout: "2s"
+max_questions: 1
+dnssec: true
+tls:
+  cert_file: ""
+  key_file: ""
+  dot_listen: ""
+admin:
+  allow_insecure_http: true
+access:
+  queries_per_second: 200
+  burst: 400
+  max_in_flight: 1024
+cache:
+  entries: 100000
+  min_ttl: "5s"
+  max_ttl: "1h"
+blocking:
+  mode: "nxdomain"
+  ipv4: "0.0.0.0"
+  ipv6: "::"
+  denylist: []
+  allowlist: []
+blocklists:
+  files: []
+  file_roots: []
+  urls: []
+  refresh: "24h"
+  max_download_bytes: 52428800
+records: []

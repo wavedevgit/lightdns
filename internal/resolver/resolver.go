@@ -15,6 +15,7 @@ import (
 	"github.com/miekg/dns"
 	"golang.org/x/sync/singleflight"
 
+	"lightdns/internal/authoritative"
 	"lightdns/internal/blocklist"
 	"lightdns/internal/cache"
 	"lightdns/internal/records"
@@ -33,6 +34,7 @@ type Metrics struct {
 type Resolver struct {
 	blocklists *blocklist.Store
 	current    atomic.Pointer[runtimeConfig]
+	managed    atomic.Pointer[authoritative.Snapshot]
 	next       atomic.Uint64
 	group      singleflight.Group
 	Metrics    Metrics
@@ -69,24 +71,45 @@ type Options struct {
 	DNSSEC       bool
 }
 
+type Prepared struct {
+	state *runtimeConfig
+}
+
 func New(options Options) (*Resolver, error) {
 	if options.Blocklists == nil || options.Cache == nil {
 		return nil, fmt.Errorf("blocklist store and cache are required")
 	}
 	r := &Resolver{blocklists: options.Blocklists}
+	r.managed.Store(authoritative.Empty())
 	if err := r.Update(options); err != nil {
 		return nil, err
 	}
 	return r, nil
 }
 
+func (r *Resolver) ReplaceManaged(snapshot *authoritative.Snapshot) {
+	if snapshot == nil {
+		snapshot = authoritative.Empty()
+	}
+	r.managed.Store(snapshot)
+}
+
 func (r *Resolver) Update(options Options) error {
+	prepared, err := Prepare(options)
+	if err != nil {
+		return err
+	}
+	r.Publish(prepared)
+	return nil
+}
+
+func Prepare(options Options) (*Prepared, error) {
 	if options.Cache == nil {
-		return fmt.Errorf("cache is required")
+		return nil, fmt.Errorf("cache is required")
 	}
 	localRecords, err := records.New(options.Records)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	state := &runtimeConfig{
 		cache: options.Cache, timeout: options.Timeout, maxQuestions: options.MaxQuestions,
@@ -111,31 +134,59 @@ func (r *Resolver) Update(options Options) error {
 			network, address = before, after
 		}
 		if network != "udp" && network != "tcp" && network != "tcp-tls" {
-			return fmt.Errorf("unsupported upstream protocol %q", network)
+			return nil, fmt.Errorf("unsupported upstream protocol %q", network)
 		}
 		if _, _, err := net.SplitHostPort(address); err != nil {
-			return fmt.Errorf("upstream %q must include a port: %w", value, err)
+			return nil, fmt.Errorf("upstream %q must include a port: %w", value, err)
 		}
 		state.upstreams = append(state.upstreams, upstream{network: network, address: address})
 	}
-	r.current.Store(state)
-	return nil
+	return &Prepared{state: state}, nil
+}
+
+func (r *Resolver) Publish(prepared *Prepared) {
+	r.current.Store(prepared.state)
 }
 
 func (r *Resolver) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	r.Metrics.Queries.Add(1)
 	state := r.current.Load()
+	if req.Opcode != dns.OpcodeQuery {
+		writeRcode(w, req, dns.RcodeNotImplemented)
+		return
+	}
+	if opt := req.IsEdns0(); opt != nil && opt.Version() != 0 {
+		writeRcode(w, req, dns.RcodeBadVers)
+		return
+	}
 	if len(req.Question) == 0 || len(req.Question) > state.maxQuestions {
 		writeRcode(w, req, dns.RcodeFormatError)
 		return
 	}
 	q := req.Question[0]
+	if q.Qtype == dns.TypeAXFR || q.Qtype == dns.TypeIXFR {
+		writeRcode(w, req, dns.RcodeRefused)
+		return
+	}
+	if result := r.managed.Load().Lookup(q); result.Managed {
+		r.Metrics.LocalAnswers.Add(1)
+		response := new(dns.Msg)
+		response.SetReply(req)
+		response.Authoritative = true
+		response.Rcode = result.Rcode
+		response.Answer = result.Answer
+		response.Ns = result.Authority
+		setResponseEDNS(response, req)
+		_ = w.WriteMsg(response)
+		return
+	}
 	if answers, known := state.records.Lookup(q); known {
 		r.Metrics.LocalAnswers.Add(1)
 		response := new(dns.Msg)
 		response.SetReply(req)
 		response.Authoritative = true
 		response.Answer = answers
+		setResponseEDNS(response, req)
 		_ = w.WriteMsg(response)
 		return
 	}
@@ -149,6 +200,7 @@ func (r *Resolver) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		response.SetReply(req)
 		response.Authoritative = true
 		response.Rcode = dns.RcodeNameError
+		setResponseEDNS(response, req)
 		_ = w.WriteMsg(response)
 		return
 	}
@@ -283,6 +335,7 @@ func (r *Resolver) writeBlocked(w dns.ResponseWriter, req *dns.Msg, state *runti
 	response := new(dns.Msg)
 	response.SetReply(req)
 	response.Authoritative = true
+	setResponseEDNS(response, req)
 	if state.blockMode == "nxdomain" {
 		response.Rcode = dns.RcodeNameError
 		_ = w.WriteMsg(response)
@@ -317,5 +370,21 @@ func (r *Resolver) MetricsHandler() http.Handler {
 func writeRcode(w dns.ResponseWriter, req *dns.Msg, rcode int) {
 	response := new(dns.Msg)
 	response.SetRcode(req, rcode)
+	setResponseEDNS(response, req)
 	_ = w.WriteMsg(response)
+}
+
+func setResponseEDNS(response, request *dns.Msg) {
+	opt := request.IsEdns0()
+	if opt == nil {
+		return
+	}
+	size := opt.UDPSize()
+	if size < dns.MinMsgSize {
+		size = dns.MinMsgSize
+	}
+	if size > 1232 {
+		size = 1232
+	}
+	response.SetEdns0(size, opt.Do())
 }

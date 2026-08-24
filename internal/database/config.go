@@ -26,24 +26,66 @@ type configEnvelope struct {
 }
 
 func (s *Store) SaveConfig(ctx context.Context, cfg config.Config, expectedRevision int64) (int64, error) {
+	data, err := encodeConfig(cfg)
+	if err != nil {
+		return 0, err
+	}
+	return saveConfig(ctx, s.db, data, expectedRevision)
+}
+
+func (s *Store) SaveConfigAudited(ctx context.Context, cfg config.Config, expectedRevision int64, actor User) (int64, error) {
+	if actor.Role != RoleAdmin {
+		return 0, ErrForbidden
+	}
+	data, err := encodeConfig(cfg)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin configuration save: %w", err)
+	}
+	defer tx.Rollback()
+	revision, err := saveConfig(ctx, tx, data, expectedRevision)
+	if err != nil {
+		return 0, err
+	}
+	if err := appendAudit(ctx, tx, actor.ID, "settings.update", "settings", configurationKey, map[string]any{"revision": revision}); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit configuration save: %w", err)
+	}
+	return revision, nil
+}
+
+func encodeConfig(cfg config.Config) ([]byte, error) {
 	cfg.Admin.Token = ""
 	if err := cfg.ValidateSettings(); err != nil {
-		return 0, fmt.Errorf("validate configuration: %w", err)
+		return nil, fmt.Errorf("validate configuration: %w", err)
 	}
 	data, err := json.Marshal(configEnvelope{Version: configurationVersion, Config: &cfg})
 	if err != nil {
-		return 0, fmt.Errorf("encode configuration: %w", err)
+		return nil, fmt.Errorf("encode configuration: %w", err)
 	}
+	return data, nil
+}
 
+type configQueryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func saveConfig(ctx context.Context, queryer configQueryRower, data []byte, expectedRevision int64) (int64, error) {
+	var err error
 	var revision int64
 	if expectedRevision == 0 {
-		err = s.db.QueryRowContext(ctx, `
+		err = queryer.QueryRowContext(ctx, `
 			INSERT INTO settings (key, value) VALUES (?, ?)
 			ON CONFLICT (key) DO NOTHING
 			RETURNING revision
 		`, configurationKey, string(data)).Scan(&revision)
 	} else {
-		err = s.db.QueryRowContext(ctx, `
+		err = queryer.QueryRowContext(ctx, `
 			UPDATE settings
 			SET value = ?, updated_at = unixepoch(), revision = revision + 1
 			WHERE key = ? AND revision = ?
@@ -112,6 +154,21 @@ func (s *Store) LoadConfig(ctx context.Context) (config.Config, int64, bool, err
 	}
 	cfg.Admin.Token = ""
 	return cfg, revision, true, nil
+}
+
+func (s *Store) DiscardConfig(ctx context.Context, revision int64) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM settings WHERE key = ? AND revision = ?", configurationKey, revision)
+	if err != nil {
+		return fmt.Errorf("discard configuration: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("discard configuration: %w", err)
+	}
+	if count != 1 {
+		return ErrConfigConflict
+	}
+	return nil
 }
 
 func rejectDuplicateKeys(data []byte) error {

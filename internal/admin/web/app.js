@@ -1,21 +1,24 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 let config = null;
+let configRevision = null;
 let toastTimer;
 let pendingRemoval = null;
 let configDirty = false;
 let recordDraftDirty = false;
 
 async function api(path, options = {}) {
+  const { captureETag = false, ...fetchOptions } = options;
   const headers = { ...options.headers };
   if (options.body) headers["Content-Type"] = "application/json";
   if (options.method && options.method !== "GET") headers["X-LightDNS-Request"] = "dashboard";
-  const response = await fetch(path, { ...options, headers });
+  const response = await fetch(path, { ...fetchOptions, headers });
   const data = response.status === 204 ? {} : await response.json();
   if (!response.ok) {
     if (response.status === 401) location.replace("/login");
     throw new Error(data.error || `Request failed with status ${response.status}.`);
   }
+  if (captureETag) configRevision = response.headers.get("ETag");
   return data;
 }
 
@@ -198,12 +201,11 @@ function collectForm() {
     key_file: $("#tls-key").value.trim(),
     dot_listen: $("#dot-listen").value.trim()
   };
-  next.admin = { ...next.admin, token: $("#admin-token").value };
-  return next;
+	return next;
 }
 
 async function loadConfig() {
-  config = await api("/api/config");
+  config = await api("/api/settings", { captureETag: true });
   fillForm(config);
   initializeView();
   await loadStats();
@@ -241,9 +243,8 @@ $("#save").addEventListener("click", async () => {
   button.setAttribute("aria-busy", "true");
   try {
     const next = collectForm();
-    const result = await api("/api/config", { method: "PUT", body: JSON.stringify(next) });
-    config = await api("/api/config");
-    $("#admin-token").value = "";
+    const result = await api("/api/settings", { method: "PUT", headers: { "If-Match": configRevision }, body: JSON.stringify(next) });
+    config = await api("/api/settings", { captureETag: true });
     setDirty(false);
     notify(result.restart_required ? "Saved. Restart LightDNS to apply listener changes." : "Saved and applied live.");
   } catch (error) {
