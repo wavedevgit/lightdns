@@ -42,3 +42,15 @@ func TestUpstreamsAreOptional(t *testing.T) {
 		t.Fatalf("local-only configuration was rejected: %v", err)
 	}
 }
+
+func TestSettingsValidationDoesNotRequireLegacyToken(t *testing.T) {
+	cfg := Default()
+	cfg.HTTPListen = "127.0.0.1:8080"
+	if err := cfg.ValidateSettings(); err != nil {
+		t.Fatalf("settings validation required the legacy token: %v", err)
+	}
+	cfg.HTTPListen = "0.0.0.0:8080"
+	if err := cfg.ValidateSettings(); err == nil {
+		t.Fatal("settings validation accepted non-loopback plaintext HTTP")
+	}
+}

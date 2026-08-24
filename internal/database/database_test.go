@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -126,6 +127,42 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	}
 	if _, err := Open(t.Context(), path); err == nil {
 		t.Fatal("newer database schema was accepted")
+	}
+}
+
+func TestOpenMigratesVersionOneDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lightdns.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL DEFAULT (unixepoch())) STRICT`,
+		`CREATE TABLE settings (key TEXT PRIMARY KEY NOT NULL CHECK (length(key) > 0), value TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch())) STRICT`,
+		`INSERT INTO schema_migrations (version) VALUES (1)`,
+		`INSERT INTO settings (key, value) VALUES ('legacy', 'preserved')`,
+	} {
+		if _, err := legacy.Exec(statement); err != nil {
+			_ = legacy.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if version, err := store.SchemaVersion(t.Context()); err != nil || version != CurrentSchemaVersion {
+		t.Fatalf("schema version = %d, err = %v", version, err)
+	}
+	var value string
+	var revision int64
+	if err := store.db.QueryRow("SELECT value, revision FROM settings WHERE key = 'legacy'").Scan(&value, &revision); err != nil || value != "preserved" || revision != 1 {
+		t.Fatalf("legacy setting value = %q, revision = %d, err = %v", value, revision, err)
 	}
 }
 
