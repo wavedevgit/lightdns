@@ -12,19 +12,22 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 type Store struct {
 	db *sql.DB
 }
 
-var migrations = [CurrentSchemaVersion]string{
-	`CREATE TABLE settings (
-		key TEXT PRIMARY KEY NOT NULL CHECK (length(key) > 0),
-		value TEXT NOT NULL,
-		updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-	) STRICT`,
-	`ALTER TABLE settings ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+var migrations = [CurrentSchemaVersion][]string{
+	{
+		`CREATE TABLE settings (
+			key TEXT PRIMARY KEY NOT NULL CHECK (length(key) > 0),
+			value TEXT NOT NULL,
+			updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+		) STRICT`,
+	},
+	{`ALTER TABLE settings ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`},
+	coreModelsMigration,
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -130,7 +133,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("database schema version %d is newer than supported version %d", latest, CurrentSchemaVersion)
 	}
 
-	for index, statement := range migrations {
+	for index, statements := range migrations {
 		version := index + 1
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
@@ -147,7 +150,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			}
 			continue
 		}
-		if _, err = tx.ExecContext(ctx, statement); err == nil {
+		for _, statement := range statements {
+			if _, err = tx.ExecContext(ctx, statement); err != nil {
+				break
+			}
+		}
+		if err == nil {
 			_, err = tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", version)
 		}
 		if err != nil {
