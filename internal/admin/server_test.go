@@ -173,6 +173,7 @@ func TestSettingsRequireCurrentRevision(t *testing.T) {
 	if response.Code != http.StatusOK || response.Header().Get("ETag") == "" {
 		t.Fatalf("settings status=%d etag=%q", response.Code, response.Header().Get("ETag"))
 	}
+	etag := response.Header().Get("ETag")
 	var cfg config.Config
 	if err := json.Unmarshal(response.Body.Bytes(), &cfg); err != nil {
 		t.Fatal(err)
@@ -186,11 +187,11 @@ func TestSettingsRequireCurrentRevision(t *testing.T) {
 	if response.Code != http.StatusPreconditionRequired {
 		t.Fatalf("missing revision status=%d body=%s", response.Code, response.Body.String())
 	}
-	revision := responseForSettingsUpdate(t, handler, cookie, string(body))
+	revision := responseForSettingsUpdate(t, handler, cookie, string(body), etag)
 	if revision.Code != http.StatusOK {
 		t.Fatalf("settings update status=%d body=%s", revision.Code, revision.Body.String())
 	}
-	stale := responseForSettingsUpdate(t, handler, cookie, string(body))
+	stale := responseForSettingsUpdate(t, handler, cookie, string(body), etag)
 	if stale.Code != http.StatusConflict {
 		t.Fatalf("stale settings status=%d body=%s", stale.Code, stale.Body.String())
 	}
@@ -200,12 +201,12 @@ func TestSettingsRequireCurrentRevision(t *testing.T) {
 	}
 }
 
-func responseForSettingsUpdate(t *testing.T, handler http.Handler, cookie *http.Cookie, body string) *httptest.ResponseRecorder {
+func responseForSettingsUpdate(t *testing.T, handler http.Handler, cookie *http.Cookie, body, etag string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-LightDNS-Request", "dashboard")
-	request.Header.Set("If-Match", "\"1\"")
+	request.Header.Set("If-Match", etag)
 	request.AddCookie(cookie)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -304,7 +305,9 @@ func apiRequest(t *testing.T, handler http.Handler, method, path, body string, c
 	if method != http.MethodGet {
 		request.Header.Set("X-LightDNS-Request", "dashboard")
 	}
-	request.AddCookie(cookie)
+	if cookie != nil {
+		request.AddCookie(cookie)
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
