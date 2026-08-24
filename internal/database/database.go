@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 type Store struct {
 	db *sql.DB
@@ -24,6 +24,7 @@ var migrations = [CurrentSchemaVersion]string{
 		value TEXT NOT NULL,
 		updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 	) STRICT`,
+	`ALTER TABLE settings ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -101,7 +102,10 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO settings (key, value) VALUES (?, ?)
-		ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()
+		ON CONFLICT (key) DO UPDATE SET
+			value = excluded.value,
+			updated_at = unixepoch(),
+			revision = settings.revision + 1
 	`, key, value)
 	if err != nil {
 		return fmt.Errorf("write setting %q: %w", key, err)

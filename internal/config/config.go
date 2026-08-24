@@ -135,6 +135,14 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) Validate() error {
+	return c.validate(true)
+}
+
+func (c *Config) ValidateSettings() error {
+	return c.validate(false)
+}
+
+func (c *Config) validate(requireLegacyToken bool) error {
 	var err error
 	if c.Listen == "" {
 		return errors.New("listen is required")
@@ -174,11 +182,13 @@ func (c *Config) Validate() error {
 		return errors.New("access limits must be positive and burst must be at least queries_per_second")
 	}
 	if c.HTTPListen != "" {
-		if c.Admin.Token == "" {
-			return errors.New("admin.token is required when http_listen is enabled")
-		}
-		if len(c.Admin.Token) < 8 {
-			return errors.New("admin.token must contain at least 8 characters")
+		if requireLegacyToken {
+			if c.Admin.Token == "" {
+				return errors.New("admin.token is required when http_listen is enabled")
+			}
+			if len(c.Admin.Token) < 8 {
+				return errors.New("admin.token must contain at least 8 characters")
+			}
 		}
 		if c.TLS.CertFile == "" && !loopbackListener(c.HTTPListen) && !c.Admin.AllowInsecureHTTP {
 			return errors.New("plaintext http_listen must bind to a loopback address")
