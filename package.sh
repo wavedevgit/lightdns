@@ -30,8 +30,10 @@ install -m 755 lightdns install.sh run.sh "$staging/$package/"
 install -m 644 config.example.yaml README.md "$staging/$package/"
 
 archive="dist/$package.tar.gz"
-tar -C "$staging" -czf "$archive" "$package"
-sha256sum "$archive" >"$archive.sha256"
+tar_file="$staging/$package.tar"
+tar -C "$staging" --sort=name --owner=0 --group=0 --numeric-owner --mtime='UTC 2020-01-01' -cf "$tar_file" "$package"
+gzip -n -c "$tar_file" >"$archive"
+(cd dist && sha256sum "$package.tar.gz" >"$package.tar.gz.sha256")
 
 printf 'Created %s\n' "$archive"
 printf 'Created %s.sha256\n' "$archive"

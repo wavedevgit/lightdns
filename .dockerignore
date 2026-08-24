@@ -2,6 +2,8 @@
 lightdns
 *.md
 *.state.yaml
+*.db*
+admin-password.txt
 dist
 *.zip
 .env*

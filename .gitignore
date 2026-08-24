@@ -2,6 +2,10 @@
 /lightdns.zip
 /dist/
 *.state.yaml
+*.db
+*.db-shm
+*.db-wal
+admin-password.txt
 .env
 .env.*
 *.pem

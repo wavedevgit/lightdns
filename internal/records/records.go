@@ -22,23 +22,11 @@ type Store struct {
 func New(input []Record) (*Store, error) {
 	store := &Store{records: make(map[string][]dns.RR)}
 	for index, record := range input {
-		record.Name = strings.ToLower(dns.Fqdn(strings.TrimSpace(record.Name)))
-		record.Type = strings.ToUpper(strings.TrimSpace(record.Type))
-		if record.Name == "." || record.TTL == 0 {
-			return nil, fmt.Errorf("record %d: name and a positive TTL are required", index+1)
-		}
-		if !supported(record.Type) {
-			return nil, fmt.Errorf("record %d: unsupported type %q", index+1, record.Type)
-		}
-		value := strings.TrimSpace(record.Value)
-		if record.Type == "TXT" {
-			value = strconv.Quote(value)
-		}
-		rr, err := dns.NewRR(fmt.Sprintf("%s %d IN %s %s", record.Name, record.TTL, record.Type, value))
+		rr, err := Parse(record)
 		if err != nil {
 			return nil, fmt.Errorf("record %d: %w", index+1, err)
 		}
-		store.records[record.Name] = append(store.records[record.Name], rr)
+		store.records[rr.Header().Name] = append(store.records[rr.Header().Name], rr)
 	}
 	for name, values := range store.records {
 		hasCNAME := false
@@ -50,6 +38,26 @@ func New(input []Record) (*Store, error) {
 		}
 	}
 	return store, nil
+}
+
+func Parse(record Record) (dns.RR, error) {
+	record.Name = strings.ToLower(dns.Fqdn(strings.TrimSpace(record.Name)))
+	record.Type = strings.ToUpper(strings.TrimSpace(record.Type))
+	if record.Name == "." || record.TTL == 0 {
+		return nil, fmt.Errorf("name and a positive TTL are required")
+	}
+	if !supported(record.Type) {
+		return nil, fmt.Errorf("unsupported type %q", record.Type)
+	}
+	value := strings.TrimSpace(record.Value)
+	if record.Type == "TXT" {
+		value = strconv.Quote(value)
+	}
+	rr, err := dns.NewRR(fmt.Sprintf("%s %d IN %s %s", record.Name, record.TTL, record.Type, value))
+	if err != nil {
+		return nil, err
+	}
+	return rr, nil
 }
 
 func (s *Store) Lookup(question dns.Question) (answers []dns.RR, known bool) {

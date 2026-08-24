@@ -1,37 +1,43 @@
 package admin
 
 import (
-	"crypto/rand"
+	"context"
 	"embed"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"lightdns/internal/config"
+	"lightdns/internal/database"
 	"lightdns/internal/resolver"
 )
 
 //go:embed web/*
 var webFiles embed.FS
 
-type Server struct {
-	controller *Controller
-	resolver   *resolver.Resolver
-	limiter    *authLimiter
-	sessionsMu sync.Mutex
-	sessions   map[string]time.Time
-}
-
 const (
 	sessionCookie   = "lightdns_session"
 	sessionLifetime = 12 * time.Hour
 )
+
+type principalKey struct{}
+
+type Server struct {
+	controller *Controller
+	resolver   *resolver.Resolver
+	database   *database.Store
+	limiter    *authLimiter
+	authSlots  chan struct{}
+}
 
 type authAttempt struct {
 	count int
@@ -45,65 +51,86 @@ type authLimiter struct {
 
 func NewServer(controller *Controller, dnsResolver *resolver.Resolver) http.Handler {
 	server := &Server{
-		controller: controller, resolver: dnsResolver,
-		limiter: &authLimiter{attempts: make(map[string]authAttempt)}, sessions: make(map[string]time.Time),
+		controller: controller, resolver: dnsResolver, database: controller.Database(),
+		limiter: &authLimiter{attempts: make(map[string]authAttempt)}, authSlots: make(chan struct{}, 4),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /login", server.loginPage)
 	mux.HandleFunc("POST /login", server.login)
-	mux.HandleFunc("POST /logout", server.sessionOnly(server.logout))
-	mux.HandleFunc("GET /api/config", server.auth(server.getConfig))
-	mux.HandleFunc("PUT /api/config", server.auth(server.putConfig))
-	mux.HandleFunc("GET /api/stats", server.auth(server.getStats))
-	mux.HandleFunc("POST /api/blocklists/reload", server.auth(server.reloadBlocklists))
-	mux.HandleFunc("GET /login.css", func(w http.ResponseWriter, request *http.Request) {
+	mux.HandleFunc("POST /logout", server.authenticated(server.logout))
+	mux.HandleFunc("GET /change-password", server.authenticated(func(w http.ResponseWriter, _ *http.Request) {
+		serveWebFile(w, "password.html", "text/html; charset=utf-8")
+	}))
+	mux.HandleFunc("POST /change-password", server.authenticated(server.changePasswordForm))
+	mux.HandleFunc("POST /api/session", server.apiLogin)
+	mux.HandleFunc("GET /api/session", server.authenticated(server.getSession))
+	mux.HandleFunc("DELETE /api/session", server.authenticated(server.logout))
+	mux.HandleFunc("PUT /api/session/password", server.authenticated(server.changePassword))
+	mux.HandleFunc("GET /api/config", server.adminOnly(server.getConfig))
+	mux.HandleFunc("PUT /api/config", server.adminOnly(server.putConfig))
+	mux.HandleFunc("GET /api/settings", server.adminOnly(server.getConfig))
+	mux.HandleFunc("PUT /api/settings", server.adminOnly(server.putConfig))
+	mux.HandleFunc("GET /api/stats", server.authenticated(server.getStats))
+	mux.HandleFunc("POST /api/blocklists/reload", server.adminOnly(server.reloadBlocklists))
+	server.registerManagementRoutes(mux)
+	mux.HandleFunc("GET /login.css", func(w http.ResponseWriter, _ *http.Request) {
 		serveWebFile(w, "login.css", "text/css; charset=utf-8")
 	})
-	mux.HandleFunc("GET /{$}", server.sessionOnly(server.webFile("index.html", "text/html; charset=utf-8")))
-	mux.HandleFunc("GET /index.html", server.sessionOnly(server.webFile("index.html", "text/html; charset=utf-8")))
-	mux.HandleFunc("GET /app.js", server.sessionOnly(server.webFile("app.js", "text/javascript; charset=utf-8")))
-	mux.HandleFunc("GET /app.css", server.sessionOnly(server.webFile("app.css", "text/css; charset=utf-8")))
-	mux.HandleFunc("GET /pico.min.css", server.sessionOnly(server.webFile("pico.min.css", "text/css; charset=utf-8")))
+	mux.HandleFunc("GET /{$}", server.authenticated(server.webFile("index.html", "text/html; charset=utf-8")))
+	mux.HandleFunc("GET /index.html", server.authenticated(server.webFile("index.html", "text/html; charset=utf-8")))
+	mux.HandleFunc("GET /app.js", server.authenticated(server.webFile("app.js", "text/javascript; charset=utf-8")))
+	mux.HandleFunc("GET /app.css", server.authenticated(server.webFile("app.css", "text/css; charset=utf-8")))
+	mux.HandleFunc("GET /pico.min.css", server.authenticated(server.webFile("pico.min.css", "text/css; charset=utf-8")))
 	return SecurityHeaders(mux)
 }
 
 func Protect(controller *Controller, next http.Handler) http.Handler {
-	server := &Server{controller: controller, limiter: &authLimiter{attempts: make(map[string]authAttempt)}}
-	return server.auth(next.ServeHTTP)
+	server := &Server{controller: controller, database: controller.Database(), limiter: &authLimiter{attempts: make(map[string]authAttempt)}}
+	return server.adminOnly(next.ServeHTTP)
 }
 
 func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.controller.Snapshot())
+	cfg, revision := s.controller.SnapshotWithRevision()
+	w.Header().Set("ETag", fmt.Sprintf("\"%d\"", revision))
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 func (s *Server) putConfig(w http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(w, request.Body, 2<<20)
 	var cfg config.Config
-	decoder := json.NewDecoder(request.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&cfg); err != nil {
+	if err := decodeJSON(request.Body, &cfg); err != nil {
 		writeError(w, http.StatusBadRequest, "Configuration is not valid JSON.")
 		return
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		writeError(w, http.StatusBadRequest, "Configuration must contain one JSON object.")
-		return
-	}
-	rotatesToken := cfg.Admin.Token != ""
-	restart, err := s.controller.Apply(request.Context(), cfg)
-	if err != nil {
+	cfg.Admin.Token = ""
+	if err := cfg.ValidateSettings(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if rotatesToken {
-		s.clearSessions()
+	expectedRevision, ok := requiredRevision(w, request)
+	if !ok {
+		return
+	}
+	restart, err := s.controller.ApplyRevisionAudited(request.Context(), cfg, expectedRevision, currentPrincipal(request).User)
+	if err != nil {
+		if errors.Is(err, database.ErrConfigConflict) {
+			writeError(w, http.StatusConflict, "Settings changed since they were loaded.")
+			return
+		}
+		slog.Error("settings update failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "Settings could not be saved.")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"saved": true, "restart_required": restart})
 }
 
 func (s *Server) loginPage(w http.ResponseWriter, request *http.Request) {
-	if s.validSession(request) {
+	if _, err := s.session(request); err == nil {
 		http.Redirect(w, request, "/", http.StatusSeeOther)
+		return
+	} else if !errors.Is(err, database.ErrSessionNotFound) {
+		slog.Error("session lookup failed", "error", err)
+		http.Error(w, "Authentication storage is unavailable.", http.StatusServiceUnavailable)
 		return
 	}
 	name := "login.html"
@@ -114,6 +141,10 @@ func (s *Server) loginPage(w http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, request *http.Request) {
+	if !sameOriginLogin(request) {
+		http.Error(w, "Login origin is not valid.", http.StatusForbidden)
+		return
+	}
 	peer := peerIP(request.RemoteAddr)
 	now := time.Now()
 	if retry, limited := s.limiter.limited(peer, now); limited {
@@ -122,33 +153,138 @@ func (s *Server) login(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	request.Body = http.MaxBytesReader(w, request.Body, 4096)
-	if err := request.ParseForm(); err != nil || !s.controller.Authorized(request.Form.Get("token")) {
+	if err := request.ParseForm(); err != nil {
+		http.Redirect(w, request, "/login?error=1", http.StatusSeeOther)
+		return
+	}
+	if !s.beginAuthentication() {
+		http.Error(w, "Authentication is busy. Try again.", http.StatusServiceUnavailable)
+		return
+	}
+	created, err := s.database.CreateAuthenticatedSession(request.Context(), request.Form.Get("username"), request.Form.Get("password"), sessionLifetime)
+	s.endAuthentication()
+	if err != nil {
+		if !errors.Is(err, database.ErrInvalidCredentials) {
+			slog.Error("login storage operation failed", "error", err)
+			http.Error(w, "Authentication storage is unavailable.", http.StatusServiceUnavailable)
+			return
+		}
 		s.limiter.failed(peer, now)
 		http.Redirect(w, request, "/login?error=1", http.StatusSeeOther)
 		return
 	}
 	s.limiter.succeeded(peer)
-	id, err := s.createSession(now)
-	if err != nil {
-		http.Error(w, "Could not create a session.", http.StatusInternalServerError)
+	setSessionCookie(w, request, created.Token, sessionLifetime)
+	if created.User.MustChangePassword {
+		http.Redirect(w, request, "/change-password", http.StatusSeeOther)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: id, Path: "/", MaxAge: int(sessionLifetime.Seconds()),
-		HttpOnly: true, Secure: request.TLS != nil, SameSite: http.SameSiteStrictMode,
-	})
+	http.Redirect(w, request, "/", http.StatusSeeOther)
+}
+
+func (s *Server) apiLogin(w http.ResponseWriter, request *http.Request) {
+	if !sameOriginLogin(request) {
+		writeError(w, http.StatusForbidden, "Login origin is not valid.")
+		return
+	}
+	peer := peerIP(request.RemoteAddr)
+	now := time.Now()
+	if retry, limited := s.limiter.limited(peer, now); limited {
+		w.Header().Set("Retry-After", retry)
+		writeError(w, http.StatusTooManyRequests, "Too many failed authentication attempts.")
+		return
+	}
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	request.Body = http.MaxBytesReader(w, request.Body, 4096)
+	if err := decodeJSON(request.Body, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "Login request is not valid JSON.")
+		return
+	}
+	if !s.beginAuthentication() {
+		writeError(w, http.StatusServiceUnavailable, "Authentication is busy. Try again.")
+		return
+	}
+	created, err := s.database.CreateAuthenticatedSession(request.Context(), input.Username, input.Password, sessionLifetime)
+	s.endAuthentication()
+	if err != nil {
+		if !errors.Is(err, database.ErrInvalidCredentials) {
+			slog.Error("login storage operation failed", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "Authentication storage is unavailable.")
+			return
+		}
+		s.limiter.failed(peer, now)
+		writeError(w, http.StatusUnauthorized, "Invalid username or password.")
+		return
+	}
+	s.limiter.succeeded(peer)
+	setSessionCookie(w, request, created.Token, sessionLifetime)
+	writeJSON(w, http.StatusCreated, userResponse(created.User))
+}
+
+func (s *Server) getSession(w http.ResponseWriter, request *http.Request) {
+	writeJSON(w, http.StatusOK, userResponse(currentPrincipal(request).User))
+}
+
+func (s *Server) changePassword(w http.ResponseWriter, request *http.Request) {
+	var input struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	request.Body = http.MaxBytesReader(w, request.Body, 4096)
+	if err := decodeJSON(request.Body, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "Password request is not valid JSON.")
+		return
+	}
+	principal := currentPrincipal(request)
+	user, err := s.database.ChangePasswordAudited(request.Context(), principal.User.PublicID, input.CurrentPassword, input.NewPassword)
+	if err != nil {
+		writeDatabaseError(w, err)
+		return
+	}
+	created, err := s.database.CreateAuthenticatedSession(request.Context(), user.Username, input.NewPassword, sessionLifetime)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Password changed; sign in again.")
+		return
+	}
+	setSessionCookie(w, request, created.Token, sessionLifetime)
+	writeJSON(w, http.StatusOK, userResponse(user))
+}
+
+func (s *Server) changePasswordForm(w http.ResponseWriter, request *http.Request) {
+	if !sameOriginLogin(request) {
+		http.Error(w, "Password-change origin is not valid.", http.StatusForbidden)
+		return
+	}
+	request.Body = http.MaxBytesReader(w, request.Body, 4096)
+	if err := request.ParseForm(); err != nil || request.Form.Get("new_password") != request.Form.Get("confirmation") {
+		http.Redirect(w, request, "/change-password?error=1", http.StatusSeeOther)
+		return
+	}
+	principal := currentPrincipal(request)
+	user, err := s.database.ChangePasswordAudited(request.Context(), principal.User.PublicID, request.Form.Get("current_password"), request.Form.Get("new_password"))
+	if err != nil {
+		http.Redirect(w, request, "/change-password?error=1", http.StatusSeeOther)
+		return
+	}
+	created, err := s.database.CreateAuthenticatedSession(request.Context(), user.Username, request.Form.Get("new_password"), sessionLifetime)
+	if err != nil {
+		http.Error(w, "Password changed; sign in again.", http.StatusInternalServerError)
+		return
+	}
+	setSessionCookie(w, request, created.Token, sessionLifetime)
 	http.Redirect(w, request, "/", http.StatusSeeOther)
 }
 
 func (s *Server) logout(w http.ResponseWriter, request *http.Request) {
-	if request.Header.Get("X-LightDNS-Request") != "dashboard" {
-		writeError(w, http.StatusForbidden, "Request confirmation is required.")
-		return
-	}
 	if cookie, err := request.Cookie(sessionCookie); err == nil {
-		s.sessionsMu.Lock()
-		delete(s.sessions, cookie.Value)
-		s.sessionsMu.Unlock()
+		if err := s.database.DeleteSession(request.Context(), cookie.Value); err != nil {
+			slog.Error("session revocation failed", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "Session could not be revoked.")
+			return
+		}
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true,
@@ -157,10 +293,98 @@ func (s *Server) logout(w http.ResponseWriter, request *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) webFile(name, contentType string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		serveWebFile(w, name, contentType)
+func (s *Server) authenticated(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireRole("", next)
+}
+
+func (s *Server) adminOnly(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireRole(database.RoleAdmin, next)
+}
+
+func (s *Server) requireRole(role database.UserRole, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, request *http.Request) {
+		principal, err := s.session(request)
+		if err != nil {
+			if !errors.Is(err, database.ErrSessionNotFound) {
+				slog.Error("session lookup failed", "error", err)
+				writeError(w, http.StatusServiceUnavailable, "Authentication storage is unavailable.")
+				return
+			}
+			if request.URL.Path == "/" || request.URL.Path == "/index.html" || request.URL.Path == "/app.js" || request.URL.Path == "/app.css" || request.URL.Path == "/pico.min.css" {
+				http.Redirect(w, request, "/login", http.StatusSeeOther)
+				return
+			}
+			writeError(w, http.StatusUnauthorized, "Sign in to continue.")
+			return
+		}
+		if request.Method != http.MethodGet && request.Method != http.MethodHead && request.Header.Get("X-LightDNS-Request") != "dashboard" && request.URL.Path != "/api/session" && request.URL.Path != "/change-password" {
+			writeError(w, http.StatusForbidden, "Request confirmation is required.")
+			return
+		}
+		if principal.User.MustChangePassword && request.URL.Path != "/api/session/password" && request.URL.Path != "/change-password" && request.URL.Path != "/logout" && request.URL.Path != "/api/session" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "Password change is required.", "code": "password_change_required"})
+			return
+		}
+		if role != "" && principal.User.Role != role {
+			writeError(w, http.StatusForbidden, "Administrator access is required.")
+			return
+		}
+		ctx := context.WithValue(request.Context(), principalKey{}, principal)
+		next(w, request.WithContext(ctx))
 	}
+}
+
+func (s *Server) session(request *http.Request) (database.AuthenticatedSession, error) {
+	cookie, err := request.Cookie(sessionCookie)
+	if err != nil || cookie.Value == "" {
+		return database.AuthenticatedSession{}, database.ErrSessionNotFound
+	}
+	return s.database.SessionByToken(request.Context(), cookie.Value)
+}
+
+func currentPrincipal(request *http.Request) database.AuthenticatedSession {
+	return request.Context().Value(principalKey{}).(database.AuthenticatedSession)
+}
+
+func setSessionCookie(w http.ResponseWriter, request *http.Request, token string, lifetime time.Duration) {
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: token, Path: "/", MaxAge: int(lifetime.Seconds()),
+		HttpOnly: true, Secure: request.TLS != nil, SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func sameOriginLogin(request *http.Request) bool {
+	source := request.Header.Get("Origin")
+	if source == "" {
+		source = request.Header.Get("Referer")
+	}
+	if source == "" {
+		return false
+	}
+	parsed, err := url.Parse(source)
+	scheme := "http"
+	if request.TLS != nil {
+		scheme = "https"
+	}
+	return err == nil && parsed.Host != "" && strings.EqualFold(parsed.Scheme, scheme) && strings.EqualFold(parsed.Host, request.Host)
+}
+
+func requiredRevision(w http.ResponseWriter, request *http.Request) (int64, bool) {
+	value := strings.Trim(request.Header.Get("If-Match"), "\"")
+	if value == "" {
+		writeError(w, http.StatusPreconditionRequired, "If-Match is required.")
+		return 0, false
+	}
+	revision, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || revision <= 0 {
+		writeError(w, http.StatusBadRequest, "If-Match is not a valid revision.")
+		return 0, false
+	}
+	return revision, true
+}
+
+func (s *Server) webFile(name, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) { serveWebFile(w, name, contentType) }
 }
 
 func serveWebFile(w http.ResponseWriter, name, contentType string) {
@@ -171,61 +395,6 @@ func serveWebFile(w http.ResponseWriter, name, contentType string) {
 	}
 	w.Header().Set("Content-Type", contentType)
 	_, _ = w.Write(data)
-}
-
-func (s *Server) sessionOnly(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, request *http.Request) {
-		if !s.validSession(request) {
-			http.Redirect(w, request, "/login", http.StatusSeeOther)
-			return
-		}
-		next(w, request)
-	}
-}
-
-func (s *Server) createSession(now time.Time) (string, error) {
-	random := make([]byte, 32)
-	if _, err := rand.Read(random); err != nil {
-		return "", err
-	}
-	id := base64.RawURLEncoding.EncodeToString(random)
-	s.sessionsMu.Lock()
-	defer s.sessionsMu.Unlock()
-	for key, expiry := range s.sessions {
-		if !now.Before(expiry) {
-			delete(s.sessions, key)
-		}
-	}
-	if len(s.sessions) >= 4096 {
-		for key := range s.sessions {
-			delete(s.sessions, key)
-			break
-		}
-	}
-	s.sessions[id] = now.Add(sessionLifetime)
-	return id, nil
-}
-
-func (s *Server) validSession(request *http.Request) bool {
-	cookie, err := request.Cookie(sessionCookie)
-	if err != nil || cookie.Value == "" {
-		return false
-	}
-	now := time.Now()
-	s.sessionsMu.Lock()
-	defer s.sessionsMu.Unlock()
-	expiry, ok := s.sessions[cookie.Value]
-	if !ok || !now.Before(expiry) {
-		delete(s.sessions, cookie.Value)
-		return false
-	}
-	return true
-}
-
-func (s *Server) clearSessions() {
-	s.sessionsMu.Lock()
-	clear(s.sessions)
-	s.sessionsMu.Unlock()
 }
 
 func (s *Server) getStats(w http.ResponseWriter, _ *http.Request) {
@@ -247,42 +416,11 @@ func (s *Server) getStats(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) reloadBlocklists(w http.ResponseWriter, request *http.Request) {
 	if err := s.controller.ReloadBlocklists(request.Context()); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		slog.Error("blocklist reload failed", "error", err)
+		writeError(w, http.StatusBadGateway, "Blocklists could not be reloaded.")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reloaded": true, "blocked_domains": s.controller.blocks.Len()})
-}
-
-func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, request *http.Request) {
-		if s.validSession(request) {
-			if request.Method != http.MethodGet && request.Header.Get("X-LightDNS-Request") != "dashboard" {
-				writeError(w, http.StatusForbidden, "Request confirmation is required.")
-				return
-			}
-			next(w, request)
-			return
-		}
-		peer := peerIP(request.RemoteAddr)
-		if retry, limited := s.limiter.limited(peer, time.Now()); limited {
-			w.Header().Set("Retry-After", retry)
-			writeError(w, http.StatusTooManyRequests, "Too many failed authentication attempts.")
-			return
-		}
-		parts := strings.Fields(request.Header.Get("Authorization"))
-		token := ""
-		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
-			token = parts[1]
-		}
-		if !s.controller.Authorized(token) {
-			s.limiter.failed(peer, time.Now())
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "Enter the admin token to continue.")
-			return
-		}
-		s.limiter.succeeded(peer)
-		next(w, request)
-	}
 }
 
 func SecurityHeaders(next http.Handler) http.Handler {
@@ -340,6 +478,31 @@ func (l *authLimiter) succeeded(peer string) {
 	l.mu.Lock()
 	delete(l.attempts, peer)
 	l.mu.Unlock()
+}
+
+func (s *Server) beginAuthentication() bool {
+	select {
+	case s.authSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) endAuthentication() {
+	<-s.authSlots
+}
+
+func decodeJSON(reader io.Reader, target any) error {
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("expected one JSON object")
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

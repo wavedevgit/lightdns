@@ -100,6 +100,14 @@ func Default() Config {
 }
 
 func Load(path string) (Config, error) {
+	return load(path, true, true)
+}
+
+func LoadSettings(path string) (Config, error) {
+	return load(path, false, false)
+}
+
+func load(path string, applyEnvironment, requireLegacyToken bool) (Config, error) {
 	cfg := Default()
 	if path != "" {
 		data, err := os.ReadFile(path)
@@ -112,23 +120,28 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("parse config: %w", err)
 		}
 	}
-	if value := os.Getenv("LIGHTDNS_LISTEN"); value != "" {
-		cfg.Listen = value
-	}
-	if value := os.Getenv("LIGHTDNS_HTTP_LISTEN"); value != "" {
-		cfg.HTTPListen = value
-	}
-	if value := os.Getenv("LIGHTDNS_ADMIN_TOKEN"); value != "" {
-		cfg.Admin.Token = value
-	}
-	if value := os.Getenv("LIGHTDNS_ALLOW_INSECURE_HTTP"); value != "" {
-		allowed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("LIGHTDNS_ALLOW_INSECURE_HTTP: %w", err)
+	if applyEnvironment {
+		if value := os.Getenv("LIGHTDNS_LISTEN"); value != "" {
+			cfg.Listen = value
 		}
-		cfg.Admin.AllowInsecureHTTP = allowed
+		if value := os.Getenv("LIGHTDNS_HTTP_LISTEN"); value != "" {
+			cfg.HTTPListen = value
+		}
+		if value := os.Getenv("LIGHTDNS_ADMIN_TOKEN"); value != "" {
+			cfg.Admin.Token = value
+		}
+		if value := os.Getenv("LIGHTDNS_ALLOW_INSECURE_HTTP"); value != "" {
+			allowed, err := strconv.ParseBool(value)
+			if err != nil {
+				return Config{}, fmt.Errorf("LIGHTDNS_ALLOW_INSECURE_HTTP: %w", err)
+			}
+			cfg.Admin.AllowInsecureHTTP = allowed
+		}
 	}
-	if err := cfg.Validate(); err != nil {
+	if !requireLegacyToken {
+		cfg.Admin.Token = ""
+	}
+	if err := cfg.validate(requireLegacyToken); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil

@@ -96,7 +96,7 @@ func TestUserSecurityUpdatesAndListing(t *testing.T) {
 	if _, err := store.CreateAuthenticatedSession(t.Context(), second.Username, "second secure password", time.Hour); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("old password error = %v", err)
 	}
-	second, err = store.ChangePassword(t.Context(), second.PublicID, "temporary secure password", "replacement secure password")
+	second, err = store.ChangePasswordAudited(t.Context(), second.PublicID, "temporary secure password", "replacement secure password")
 	if err != nil || second.MustChangePassword {
 		t.Fatalf("changed user = %+v, err = %v", second, err)
 	}
@@ -105,5 +105,9 @@ func TestUserSecurityUpdatesAndListing(t *testing.T) {
 	}
 	if _, err := store.ChangePassword(t.Context(), second.PublicID, "wrong current password", "unused secure password"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("wrong current password error = %v", err)
+	}
+	events, err := store.ListAuditEvents(t.Context(), second, 0, 10)
+	if err != nil || len(events) != 1 || events[0].Action != "user.password_change" {
+		t.Fatalf("password audit events = %+v, err = %v", events, err)
 	}
 }

@@ -2,29 +2,32 @@ package admin
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"lightdns/internal/blocklist"
 	"lightdns/internal/cache"
 	"lightdns/internal/config"
+	"lightdns/internal/database"
 	"lightdns/internal/resolver"
 )
 
 type Controller struct {
-	mu        sync.RWMutex
-	config    config.Config
-	statePath string
-	resolver  *resolver.Resolver
-	blocks    *blocklist.Store
+	mu       sync.RWMutex
+	zoneMu   sync.Mutex
+	config   config.Config
+	revision int64
+	database *database.Store
+	resolver *resolver.Resolver
+	blocks   *blocklist.Store
 }
 
-func NewController(cfg config.Config, statePath string, dnsResolver *resolver.Resolver, blocks *blocklist.Store) *Controller {
-	return &Controller{config: cfg, statePath: statePath, resolver: dnsResolver, blocks: blocks}
+func NewController(cfg config.Config, revision int64, db *database.Store, dnsResolver *resolver.Resolver, blocks *blocklist.Store) *Controller {
+	return &Controller{config: cfg, revision: revision, database: db, resolver: dnsResolver, blocks: blocks}
 }
 
 func (c *Controller) Snapshot() config.Config {
@@ -35,13 +38,34 @@ func (c *Controller) Snapshot() config.Config {
 	return copy
 }
 
+func (c *Controller) SnapshotWithRevision() (config.Config, int64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	copy := cloneConfig(c.config)
+	copy.Admin.Token = ""
+	return copy, c.revision
+}
+
 func (c *Controller) Apply(ctx context.Context, next config.Config) (bool, error) {
+	return c.ApplyRevision(ctx, next, 0)
+}
+
+func (c *Controller) ApplyRevision(ctx context.Context, next config.Config, expectedRevision int64) (bool, error) {
+	return c.applyRevision(ctx, next, expectedRevision, nil)
+}
+
+func (c *Controller) ApplyRevisionAudited(ctx context.Context, next config.Config, expectedRevision int64, actor database.User) (bool, error) {
+	return c.applyRevision(ctx, next, expectedRevision, &actor)
+}
+
+func (c *Controller) applyRevision(ctx context.Context, next config.Config, expectedRevision int64, actor *database.User) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if next.Admin.Token == "" {
-		next.Admin.Token = c.config.Admin.Token
+	if expectedRevision > 0 && expectedRevision != c.revision {
+		return false, database.ErrConfigConflict
 	}
-	if err := next.Validate(); err != nil {
+	next.Admin.Token = ""
+	if err := next.ValidateSettings(); err != nil {
 		return false, err
 	}
 	blocklistsChanged := !slices.Equal(next.Blocklists.Files, c.config.Blocklists.Files) ||
@@ -58,12 +82,20 @@ func (c *Controller) Apply(ctx context.Context, next config.Config) (bool, error
 			return false, err
 		}
 	}
-	if err := config.Save(c.statePath, next); err != nil {
-		return false, fmt.Errorf("persist configuration: %w", err)
-	}
-	if err := c.resolver.Update(optionsFor(next, c.blocks)); err != nil {
+	prepared, err := resolver.Prepare(optionsFor(next, c.blocks))
+	if err != nil {
 		return false, err
 	}
+	var revision int64
+	if actor == nil {
+		revision, err = c.database.SaveConfig(ctx, next, c.revision)
+	} else {
+		revision, err = c.database.SaveConfigAudited(ctx, next, c.revision, *actor)
+	}
+	if err != nil {
+		return false, fmt.Errorf("persist configuration: %w", err)
+	}
+	c.resolver.Publish(prepared)
 	restartRequired := next.Listen != c.config.Listen || next.HTTPListen != c.config.HTTPListen || next.TLS != c.config.TLS ||
 		next.Access.Rate != c.config.Access.Rate ||
 		next.Access.Burst != c.config.Access.Burst || next.Access.MaxInFlight != c.config.Access.MaxInFlight
@@ -71,6 +103,7 @@ func (c *Controller) Apply(ctx context.Context, next config.Config) (bool, error
 		c.blocks.Replace(matcher)
 	}
 	c.config = next
+	c.revision = revision
 	return restartRequired, nil
 }
 
@@ -86,17 +119,27 @@ func (c *Controller) ReloadBlocklists(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) Authorized(token string) bool {
-	c.mu.RLock()
-	expected := c.config.Admin.Token
-	c.mu.RUnlock()
-	return expected != "" && len(token) == len(expected) && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
-}
-
 func (c *Controller) RefreshInterval() config.BlocklistConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.config.Blocklists
+}
+
+func (c *Controller) ReloadZones(_ context.Context) error {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	snapshot, err := c.database.AuthoritativeSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	c.resolver.ReplaceManaged(snapshot)
+	return nil
+}
+
+func (c *Controller) Database() *database.Store {
+	return c.database
 }
 
 func loaderFor(cfg config.Config) *blocklist.Loader {
@@ -121,6 +164,6 @@ func cloneConfig(cfg config.Config) config.Config {
 	data, _ := yaml.Marshal(cfg)
 	copy := config.Default()
 	_ = yaml.Unmarshal(data, &copy)
-	_ = copy.Validate()
+	_ = copy.ValidateSettings()
 	return copy
 }
