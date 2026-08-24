@@ -39,7 +39,7 @@ type User struct {
 	ID                 int64
 	PublicID           string
 	Username           string
-	PasswordHash       string
+	PasswordHash       string `json:"-"`
 	Role               UserRole
 	Enabled            bool
 	MustChangePassword bool
@@ -50,7 +50,7 @@ type User struct {
 type Session struct {
 	ID         int64
 	UserID     int64
-	TokenHash  []byte
+	TokenHash  []byte `json:"-"`
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	LastSeenAt time.Time
