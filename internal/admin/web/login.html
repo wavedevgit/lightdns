@@ -12,7 +12,8 @@
     <form method="post" action="/login">
       <span class="brand" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 13h4v8H3v-8Zm7-10h4v18h-4V3Zm7 6h4v12h-4V9Z"/></svg></span>
       <h1>Sign in</h1>
-      <label><span>Admin token</span><input name="token" type="password" autocomplete="current-password" placeholder="Admin token" required autofocus></label>
+	  <label><span>Username</span><input name="username" autocomplete="username" placeholder="admin" required autofocus></label>
+	  <label><span>Password</span><input name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></label>
       <button type="submit">Open dashboard</button>
     </form>
   </main>

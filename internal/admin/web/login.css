@@ -6,13 +6,15 @@ form { width: min(380px, 100%); padding: 1.5rem; background: #111317; border: 1p
 .brand { display: grid; place-items: center; width: 34px; height: 34px; margin: 0 auto .55rem; color: #d86d1c; }
 .brand svg { width: 26px; height: 26px; fill: currentColor; }
 h1 { margin: 0 0 1rem; font-size: 1.15rem; text-align: center; }
-label > span { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
-input, button { width: 100%; min-height: 2.5rem; border-radius: 7px; font: inherit; }
+label { display: block; color: #edf0f5; font-size: .75rem; font-weight: 600; }
+label > span { display: block; margin-bottom: .35rem; }
+input, button { width: 100%; min-height: 2.5rem; border-radius: 7px; font-family: inherit; font-size: inherit; }
+input { font-weight: 400; }
 input { margin-bottom: .75rem; padding: .5rem .7rem; background: #191a1b; color: #edf0f5; border: 1px solid #414346; outline: none; }
 input:hover { border-color: #626568; }
 input:focus { border-color: #3b82e8; box-shadow: 0 0 0 1px #3b82e8; }
 input::placeholder { color: #898d91; opacity: 1; }
-button { padding: .5rem .8rem; background: linear-gradient(to bottom, #4085ec, #2f7df4); color: #fff; border: 1px solid #4a8df5; cursor: pointer; font-weight: 650; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 1px 2px rgba(0, 0, 0, .4); }
+button { padding: .5rem .8rem; background: linear-gradient(to bottom, #4085ec, #2f7df4); color: #fff; border: 1px solid #4a8df5; cursor: pointer; font-weight: 400; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 1px 2px rgba(0, 0, 0, .4); }
 button:hover { background: linear-gradient(to bottom, #4a8df5, #2c70dd); border-color: #65a1fa; }
 small { display: block; min-height: 1.2em; margin-top: .7rem; color: #ff9ca2; text-align: center; }
 ::selection { background: rgba(47, 125, 244, .42); color: #fff; }

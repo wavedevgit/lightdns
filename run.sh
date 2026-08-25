@@ -1,28 +1,17 @@
 #!/usr/bin/env sh
 set -eu
 
-cd "$(dirname "$0")"
+binary="${LIGHTDNS_BINARY:-/usr/local/bin/lightdns}"
+database_file="${LIGHTDNS_DATABASE:-/var/lib/lightdns/lightdns.db}"
 
-config_file="${LIGHTDNS_CONFIG_FILE:-/etc/lightdns/config.yaml}"
-state_file="${LIGHTDNS_STATE_FILE:-/var/lib/lightdns/state.yaml}"
-
-if [ ! -x ./lightdns ]; then
-  printf 'lightdns is not built. Run ./build.sh first.\n' >&2
+if [ ! -x "$binary" ]; then
+  printf 'LightDNS binary is not executable: %s\n' "$binary" >&2
+  exit 1
+fi
+if [ ! -r "$database_file" ] || [ ! -w "$database_file" ] || [ ! -w "$(dirname "$database_file")" ]; then
+  printf 'LightDNS database or its directory is not accessible: %s\n' "$database_file" >&2
   exit 1
 fi
 
-if [ ! -r "$config_file" ]; then
-  printf 'Configuration is not readable: %s\n' "$config_file" >&2
-  printf 'Install and edit config.example.yaml at that location first.\n' >&2
-  exit 1
-fi
-
-if [ ! -d "$(dirname "$state_file")" ] || [ ! -w "$(dirname "$state_file")" ]; then
-  printf 'State directory is not writable: %s\n' "$(dirname "$state_file")" >&2
-  exit 1
-fi
-
-printf 'Configuration: %s\n' "$config_file"
-printf 'State: %s\n' "$state_file"
-
-exec ./lightdns -config "$config_file" -state "$state_file"
+printf 'Database: %s\n' "$database_file"
+exec "$binary" -database "$database_file"

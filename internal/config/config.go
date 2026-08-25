@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,20 +19,21 @@ import (
 )
 
 type Config struct {
-	Listen       string           `yaml:"listen" json:"listen"`
-	HTTPListen   string           `yaml:"http_listen" json:"http_listen"`
-	Upstreams    []string         `yaml:"upstreams" json:"upstreams"`
-	Timeout      time.Duration    `yaml:"-" json:"-"`
-	TimeoutText  string           `yaml:"timeout" json:"timeout"`
-	Cache        CacheConfig      `yaml:"cache" json:"cache"`
-	Blocking     BlockingConfig   `yaml:"blocking" json:"blocking"`
-	Blocklists   BlocklistConfig  `yaml:"blocklists" json:"blocklists"`
-	Admin        AdminConfig      `yaml:"admin" json:"admin"`
-	TLS          TLSConfig        `yaml:"tls" json:"tls"`
-	DNSSEC       bool             `yaml:"dnssec" json:"dnssec"`
-	Records      []records.Record `yaml:"records" json:"records"`
-	MaxQuestions int              `yaml:"max_questions" json:"max_questions"`
-	Access       AccessConfig     `yaml:"access" json:"access"`
+	Listen       string            `yaml:"listen" json:"listen"`
+	HTTPListen   string            `yaml:"http_listen" json:"http_listen"`
+	Upstreams    []string          `yaml:"upstreams" json:"upstreams"`
+	Timeout      time.Duration     `yaml:"-" json:"-"`
+	TimeoutText  string            `yaml:"timeout" json:"timeout"`
+	Cache        CacheConfig       `yaml:"cache" json:"cache"`
+	Blocking     BlockingConfig    `yaml:"blocking" json:"blocking"`
+	Blocklists   BlocklistConfig   `yaml:"blocklists" json:"blocklists"`
+	Admin        AdminConfig       `yaml:"admin" json:"admin"`
+	TLS          TLSConfig         `yaml:"tls" json:"tls"`
+	DNSSEC       bool              `yaml:"dnssec" json:"dnssec"`
+	Records      []records.Record  `yaml:"records" json:"records"`
+	MaxQuestions int               `yaml:"max_questions" json:"max_questions"`
+	Access       AccessConfig      `yaml:"access" json:"access"`
+	ZoneLimits   *ZoneLimitsConfig `yaml:"zone_limits,omitempty" json:"zone_limits,omitempty"`
 }
 
 type CacheConfig struct {
@@ -71,6 +73,13 @@ type AccessConfig struct {
 	MaxInFlight  int      `yaml:"max_in_flight" json:"max_in_flight"`
 }
 
+type ZoneLimitsConfig struct {
+	MaxTotalPerUser    int    `yaml:"max_total_per_user" json:"max_total_per_user"`
+	MaxActivePerUser   int    `yaml:"max_active_per_user" json:"max_active_per_user"`
+	MaxRejectedPerUser int    `yaml:"max_rejected_per_user" json:"max_rejected_per_user"`
+	AppealEmail        string `yaml:"appeal_email,omitempty" json:"appeal_email,omitempty"`
+}
+
 type TLSConfig struct {
 	CertFile  string `yaml:"cert_file" json:"cert_file"`
 	KeyFile   string `yaml:"key_file" json:"key_file"`
@@ -95,11 +104,31 @@ func Default() Config {
 			RefreshText:  "24h",
 			DownloadSize: 50 << 20,
 		},
-		Access: AccessConfig{Rate: 200, Burst: 400, MaxInFlight: 1024},
+		Access:     AccessConfig{Rate: 200, Burst: 400, MaxInFlight: 1024},
+		ZoneLimits: &ZoneLimitsConfig{MaxTotalPerUser: 25, MaxActivePerUser: 10, MaxRejectedPerUser: 10, AppealEmail: "admin@local.invalid"},
 	}
 }
 
+func (c Config) EffectiveZoneLimits() ZoneLimitsConfig {
+	if c.ZoneLimits == nil {
+		return ZoneLimitsConfig{MaxTotalPerUser: 25, MaxActivePerUser: 10, MaxRejectedPerUser: 10, AppealEmail: "admin@local.invalid"}
+	}
+	limits := *c.ZoneLimits
+	if limits.AppealEmail == "" {
+		limits.AppealEmail = "admin@local.invalid"
+	}
+	return limits
+}
+
 func Load(path string) (Config, error) {
+	return load(path, true, true)
+}
+
+func LoadSettings(path string) (Config, error) {
+	return load(path, false, false)
+}
+
+func load(path string, applyEnvironment, requireLegacyToken bool) (Config, error) {
 	cfg := Default()
 	if path != "" {
 		data, err := os.ReadFile(path)
@@ -112,29 +141,42 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("parse config: %w", err)
 		}
 	}
-	if value := os.Getenv("LIGHTDNS_LISTEN"); value != "" {
-		cfg.Listen = value
-	}
-	if value := os.Getenv("LIGHTDNS_HTTP_LISTEN"); value != "" {
-		cfg.HTTPListen = value
-	}
-	if value := os.Getenv("LIGHTDNS_ADMIN_TOKEN"); value != "" {
-		cfg.Admin.Token = value
-	}
-	if value := os.Getenv("LIGHTDNS_ALLOW_INSECURE_HTTP"); value != "" {
-		allowed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("LIGHTDNS_ALLOW_INSECURE_HTTP: %w", err)
+	if applyEnvironment {
+		if value := os.Getenv("LIGHTDNS_LISTEN"); value != "" {
+			cfg.Listen = value
 		}
-		cfg.Admin.AllowInsecureHTTP = allowed
+		if value := os.Getenv("LIGHTDNS_HTTP_LISTEN"); value != "" {
+			cfg.HTTPListen = value
+		}
+		if value := os.Getenv("LIGHTDNS_ADMIN_TOKEN"); value != "" {
+			cfg.Admin.Token = value
+		}
+		if value := os.Getenv("LIGHTDNS_ALLOW_INSECURE_HTTP"); value != "" {
+			allowed, err := strconv.ParseBool(value)
+			if err != nil {
+				return Config{}, fmt.Errorf("LIGHTDNS_ALLOW_INSECURE_HTTP: %w", err)
+			}
+			cfg.Admin.AllowInsecureHTTP = allowed
+		}
 	}
-	if err := cfg.Validate(); err != nil {
+	if !requireLegacyToken {
+		cfg.Admin.Token = ""
+	}
+	if err := cfg.validate(requireLegacyToken); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
 }
 
 func (c *Config) Validate() error {
+	return c.validate(true)
+}
+
+func (c *Config) ValidateSettings() error {
+	return c.validate(false)
+}
+
+func (c *Config) validate(requireLegacyToken bool) error {
 	var err error
 	if c.Listen == "" {
 		return errors.New("listen is required")
@@ -173,12 +215,25 @@ func (c *Config) Validate() error {
 	if c.Access.Rate <= 0 || c.Access.Burst < c.Access.Rate || c.Access.MaxInFlight <= 0 {
 		return errors.New("access limits must be positive and burst must be at least queries_per_second")
 	}
+	limits := c.EffectiveZoneLimits()
+	if limits.MaxTotalPerUser <= 0 || limits.MaxActivePerUser <= 0 || limits.MaxRejectedPerUser <= 0 {
+		return errors.New("zone limits must be positive")
+	}
+	if limits.MaxActivePerUser > limits.MaxTotalPerUser || limits.MaxRejectedPerUser > limits.MaxTotalPerUser {
+		return errors.New("active and rejected zone limits cannot exceed the total zone limit")
+	}
+	address, err := mail.ParseAddress(limits.AppealEmail)
+	if err != nil || address.Address != limits.AppealEmail {
+		return errors.New("zone_limits.appeal_email must be a valid email address")
+	}
 	if c.HTTPListen != "" {
-		if c.Admin.Token == "" {
-			return errors.New("admin.token is required when http_listen is enabled")
-		}
-		if len(c.Admin.Token) < 8 {
-			return errors.New("admin.token must contain at least 8 characters")
+		if requireLegacyToken {
+			if c.Admin.Token == "" {
+				return errors.New("admin.token is required when http_listen is enabled")
+			}
+			if len(c.Admin.Token) < 8 {
+				return errors.New("admin.token must contain at least 8 characters")
+			}
 		}
 		if c.TLS.CertFile == "" && !loopbackListener(c.HTTPListen) && !c.Admin.AllowInsecureHTTP {
 			return errors.New("plaintext http_listen must bind to a loopback address")

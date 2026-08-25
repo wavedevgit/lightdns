@@ -6,12 +6,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
 
+	"lightdns/internal/authoritative"
 	"lightdns/internal/blocklist"
 	"lightdns/internal/cache"
 	"lightdns/internal/records"
@@ -103,6 +105,40 @@ func TestForwardCacheAndBlock(t *testing.T) {
 	}
 }
 
+func TestManagedZoneOverridesLegacyRecordsAndBlocklists(t *testing.T) {
+	store := blocklist.NewStore(blocklist.New([]string{"example.test"}, nil))
+	r, err := New(Options{
+		Blocklists: store, Cache: cache.New(100, time.Second, time.Hour), Timeout: time.Second,
+		MaxQuestions: 1, BlockMode: "nxdomain", BlockIPv4: "0.0.0.0", BlockIPv6: "::",
+		Records: []records.Record{{Name: "www.example.test.", Type: "A", Value: "192.0.2.1", TTL: 60}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := authoritative.New([]authoritative.ZoneInput{{
+		Name: "example.test", Revision: 1,
+		Records: []records.Record{{Name: "www.example.test.", Type: "A", Value: "192.0.2.2", TTL: 60}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ReplaceManaged(snapshot)
+
+	request := new(dns.Msg)
+	request.SetQuestion("www.example.test.", dns.TypeA)
+	writer := &captureWriter{}
+	r.ServeDNS(writer, request)
+	if writer.message == nil || !writer.message.Authoritative || len(writer.message.Answer) != 1 || !strings.Contains(writer.message.Answer[0].String(), "192.0.2.2") {
+		t.Fatalf("managed response = %#v", writer.message)
+	}
+	request.SetQuestion("missing.example.test.", dns.TypeA)
+	writer = &captureWriter{}
+	r.ServeDNS(writer, request)
+	if writer.message.Rcode != dns.RcodeNameError || len(writer.message.Ns) != 1 {
+		t.Fatalf("managed negative = %#v", writer.message)
+	}
+}
+
 func TestLocalOnlyMode(t *testing.T) {
 	r, err := New(Options{
 		Blocklists: blocklist.NewStore(blocklist.New(nil, nil)),
@@ -129,6 +165,53 @@ func TestLocalOnlyMode(t *testing.T) {
 	r.ServeDNS(writer, unknown)
 	if writer.message == nil || !writer.message.Authoritative || writer.message.Rcode != dns.RcodeNameError || len(writer.message.Answer) != 0 {
 		t.Fatalf("unexpected local-only unknown response: %#v", writer.message)
+	}
+}
+
+func TestRejectsUnsupportedDNSOperationsAndNegotiatesEDNS(t *testing.T) {
+	r, err := New(Options{
+		Blocklists: blocklist.NewStore(blocklist.New(nil, nil)), Cache: cache.New(100, time.Second, time.Hour),
+		Timeout: time.Second, MaxQuestions: 1, BlockMode: "nxdomain", BlockIPv4: "0.0.0.0", BlockIPv6: "::",
+		Records: []records.Record{{Name: "local.example", Type: "A", Value: "192.0.2.25", TTL: 300}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	update := new(dns.Msg)
+	update.SetUpdate("local.example.")
+	writer := &captureWriter{}
+	r.ServeDNS(writer, update)
+	if writer.message == nil || writer.message.Rcode != dns.RcodeNotImplemented {
+		t.Fatalf("UPDATE response = %#v", writer.message)
+	}
+
+	transfer := new(dns.Msg)
+	transfer.SetAxfr("local.example.")
+	writer = &captureWriter{}
+	r.ServeDNS(writer, transfer)
+	if writer.message == nil || writer.message.Rcode != dns.RcodeRefused {
+		t.Fatalf("AXFR response = %#v", writer.message)
+	}
+
+	query := new(dns.Msg)
+	query.SetQuestion("local.example.", dns.TypeA)
+	query.SetEdns0(4096, true)
+	writer = &captureWriter{}
+	r.ServeDNS(writer, query)
+	opt := writer.message.IsEdns0()
+	if opt == nil || opt.UDPSize() != 1232 || !opt.Do() {
+		t.Fatalf("EDNS response = %#v", writer.message)
+	}
+
+	unsupportedEDNS := new(dns.Msg)
+	unsupportedEDNS.SetQuestion("local.example.", dns.TypeA)
+	unsupportedEDNS.SetEdns0(1232, false)
+	unsupportedEDNS.IsEdns0().SetVersion(1)
+	writer = &captureWriter{}
+	r.ServeDNS(writer, unsupportedEDNS)
+	if writer.message == nil || writer.message.Rcode != dns.RcodeBadVers || writer.message.IsEdns0() == nil || writer.message.IsEdns0().Version() != 0 {
+		t.Fatalf("unsupported EDNS response = %#v", writer.message)
 	}
 }
 
