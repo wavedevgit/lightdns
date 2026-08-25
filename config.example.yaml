@@ -24,6 +24,13 @@ access:
   burst: 400
   max_in_flight: 1024
 
+zone_limits:
+  # Limits apply per zone owner. Reaching the rejected limit blocks new requests.
+  max_total_per_user: 25
+  max_active_per_user: 10
+  max_rejected_per_user: 10
+  appeal_email: "dns-appeals@example.com"
+
 cache:
   entries: 100000
   min_ttl: "5s"

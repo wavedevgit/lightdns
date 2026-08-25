@@ -80,14 +80,26 @@ func TestUserManagementAPI(t *testing.T) {
 	handler, _, _, _ := newTestAdminServer(t)
 	adminCookie := loginCookie(t, handler, "admin", "correct horse battery staple")
 
-	response := apiRequest(t, handler, http.MethodPost, "/api/users", `{"username":"bob","password":"bob initial password","role":"user","unknown":true}`, adminCookie)
+	response := apiRequest(t, handler, http.MethodPost, "/api/users", `{"username":"bob","email":"bob@example.test","password":"bob initial password","role":"user","unknown":true}`, adminCookie)
 	requireStatus(t, response, http.StatusBadRequest)
 	response = apiRequest(t, handler, http.MethodPost, "/api/users", `{"username":"bob","password":"bob initial password","role":"user"}`, adminCookie)
+	requireStatus(t, response, http.StatusBadRequest)
+	response = apiRequest(t, handler, http.MethodPost, "/api/users", `{"username":"bob","email":"bob@example.test","password":"bob initial password","role":"user"}`, adminCookie)
 	requireStatus(t, response, http.StatusCreated)
 	bob := decodeBody[userView](t, response)
-	if bob.ID == "" || !bob.Enabled || bob.Role != database.RoleUser {
+	if bob.ID == "" || bob.Email != "bob@example.test" || !bob.Enabled || bob.Role != database.RoleUser {
 		t.Fatalf("created user = %+v", bob)
 	}
+	response = apiRequest(t, handler, http.MethodPatch, "/api/users/"+bob.ID, `{"email":"not-an-email"}`, adminCookie)
+	requireStatus(t, response, http.StatusBadRequest)
+	response = apiRequest(t, handler, http.MethodPatch, "/api/users/"+bob.ID, `{"username":"robert","email":"robert@example.test"}`, adminCookie)
+	requireStatus(t, response, http.StatusOK)
+	updatedBob := decodeBody[userView](t, response)
+	if updatedBob.Username != "robert" || updatedBob.Email != "robert@example.test" {
+		t.Fatalf("updated user = %+v", updatedBob)
+	}
+	response = apiRequest(t, handler, http.MethodPatch, "/api/users/"+bob.ID, `{"username":"bob","email":"bob@example.test"}`, adminCookie)
+	requireStatus(t, response, http.StatusOK)
 	bobCookie := loginCookie(t, handler, "bob", "bob initial password")
 
 	response = apiRequest(t, handler, http.MethodGet, "/api/users", "", adminCookie)
@@ -151,16 +163,15 @@ func TestUserManagementAPI(t *testing.T) {
 	requireStatus(t, response, http.StatusNotFound)
 
 	response = apiRequest(t, handler, http.MethodDelete, "/api/users/"+bob.ID, "", adminCookie)
-	requireStatus(t, response, http.StatusOK)
-	if decodeBody[userView](t, response).Enabled {
-		t.Fatal("deleted user remained enabled")
-	}
+	requireStatus(t, response, http.StatusNoContent)
+	response = apiRequest(t, handler, http.MethodGet, "/api/users/"+bob.ID, "", adminCookie)
+	requireStatus(t, response, http.StatusNotFound)
 	response = apiRequest(t, handler, http.MethodGet, "/api/session", "", bobCookie)
 	requireStatus(t, response, http.StatusUnauthorized)
 	response = apiRequest(t, handler, http.MethodDelete, "/api/users/"+loggedInUser(t, handler, adminCookie).ID, "", adminCookie)
-	requireStatus(t, response, http.StatusConflict)
-	response = apiRequest(t, handler, http.MethodPost, "/api/users", `{"username":"BOB","password":"another valid password","role":"user"}`, adminCookie)
-	requireStatus(t, response, http.StatusConflict)
+	requireStatus(t, response, http.StatusForbidden)
+	response = apiRequest(t, handler, http.MethodPost, "/api/users", `{"username":"BOB","email":"other@example.test","password":"another valid password","role":"user"}`, adminCookie)
+	requireStatus(t, response, http.StatusCreated)
 	response = apiRequest(t, handler, http.MethodGet, "/api/audit?limit=20", "", adminCookie)
 	requireStatus(t, response, http.StatusOK)
 	audit := decodeBody[struct {
@@ -172,7 +183,7 @@ func TestUserManagementAPI(t *testing.T) {
 		details map[string]any
 	}{
 		{action: "user.create", actor: loggedInUser(t, handler, adminCookie).ID, details: map[string]any{"role": "user"}},
-		{action: "user.update", actor: loggedInUser(t, handler, adminCookie).ID, details: map[string]any{"role": nil, "enabled": false}},
+		{action: "user.update", actor: loggedInUser(t, handler, adminCookie).ID, details: map[string]any{"username": nil, "email": nil, "role": nil, "enabled": false}},
 		{action: "user.password_reset", actor: loggedInUser(t, handler, adminCookie).ID, details: map[string]any{"must_change_password": true}},
 		{action: "user.password_change", actor: bob.ID, details: map[string]any{}},
 	} {
@@ -234,6 +245,12 @@ func TestZoneAndRecordManagementAPI(t *testing.T) {
 	recordBody := `{"name":"www.managed.test.","type":"A","value":"192.0.2.8","ttl":300}`
 	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/records", recordBody, aliceCookie)
 	requireStatus(t, response, http.StatusPreconditionRequired)
+	response = apiRequestAtRevision(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/records", recordBody, aliceCookie, zone.Revision)
+	requireStatus(t, response, http.StatusConflict)
+	review := `{"status":"active","reason":"","revision":` + strconv.FormatInt(zone.Revision, 10) + `}`
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/review", review, adminCookie)
+	requireStatus(t, response, http.StatusOK)
+	zone = decodeBody[zoneView](t, response)
 	response = apiRequestAtRevision(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/records", `{"name":"outside.test.","type":"A","value":"192.0.2.8","ttl":300}`, aliceCookie, zone.Revision)
 	requireStatus(t, response, http.StatusBadRequest)
 	response = apiRequestAtRevision(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/records", recordBody, aliceCookie, zone.Revision)
@@ -281,7 +298,7 @@ func TestZoneAndRecordManagementAPI(t *testing.T) {
 	staleReview := `{"status":"active","reason":"","revision":` + strconv.FormatInt(zone.Revision-1, 10) + `}`
 	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/review", staleReview, adminCookie)
 	requireStatus(t, response, http.StatusConflict)
-	review := `{"status":"active","reason":"","revision":` + strconv.FormatInt(zone.Revision, 10) + `}`
+	review = `{"status":"active","reason":"","revision":` + strconv.FormatInt(zone.Revision, 10) + `}`
 	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/review", review, adminCookie)
 	requireStatus(t, response, http.StatusOK)
 	zone = decodeBody[zoneView](t, response)
@@ -359,6 +376,57 @@ func TestZoneAndRecordManagementAPI(t *testing.T) {
 				t.Fatalf("audit before pagination returned event %d", event.ID)
 			}
 		}
+	}
+}
+
+func TestZoneLimitsAPI(t *testing.T) {
+	handler, controller, _, _ := newTestAdminServer(t)
+	cfg := controller.Snapshot()
+	cfg.ZoneLimits = &config.ZoneLimitsConfig{MaxTotalPerUser: 2, MaxActivePerUser: 1, MaxRejectedPerUser: 1}
+	if _, err := controller.Apply(t.Context(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := loginCookie(t, handler, "admin", "correct horse battery staple")
+
+	response := apiRequest(t, handler, http.MethodPost, "/api/users", `{"username":"quota-user","email":"quota@example.test","password":"quota user password","role":"user"}`, adminCookie)
+	requireStatus(t, response, http.StatusCreated)
+	userCookie := loginCookie(t, handler, "quota-user", "quota user password")
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones", `{"name":"rejected-quota.test"}`, userCookie)
+	requireStatus(t, response, http.StatusCreated)
+	rejected := decodeBody[zoneView](t, response)
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+rejected.ID+"/review", `{"status":"rejected","reason":"quota test","revision":1}`, adminCookie)
+	requireStatus(t, response, http.StatusOK)
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones", `{"name":"blocked-rejected.test"}`, userCookie)
+	requireStatus(t, response, http.StatusConflict)
+	if !strings.Contains(response.Body.String(), "rejected zone limit") {
+		t.Fatalf("rejected limit response = %s", response.Body.String())
+	}
+
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones", `{"name":"active-quota.test"}`, adminCookie)
+	requireStatus(t, response, http.StatusCreated)
+	active := decodeBody[zoneView](t, response)
+	if active.AppealEmail != "admin@local.invalid" {
+		t.Fatalf("zone appeal email = %q", active.AppealEmail)
+	}
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+active.ID+"/review", `{"status":"suspended","reason":"","revision":1}`, adminCookie)
+	requireStatus(t, response, http.StatusBadRequest)
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+active.ID+"/review", `{"status":"suspended","reason":"Policy review required","revision":1}`, adminCookie)
+	requireStatus(t, response, http.StatusOK)
+	suspended := decodeBody[zoneView](t, response)
+	if suspended.RejectionReason == nil || *suspended.RejectionReason != "Policy review required" {
+		t.Fatalf("suspended zone = %+v", suspended)
+	}
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+active.ID+"/review", `{"status":"active","revision":2}`, adminCookie)
+	requireStatus(t, response, http.StatusOK)
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones", `{"name":"pending-quota.test"}`, adminCookie)
+	requireStatus(t, response, http.StatusCreated)
+	pending := decodeBody[zoneView](t, response)
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones", `{"name":"blocked-total.test"}`, adminCookie)
+	requireStatus(t, response, http.StatusConflict)
+	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+pending.ID+"/review", `{"status":"active","revision":1}`, adminCookie)
+	requireStatus(t, response, http.StatusConflict)
+	if !strings.Contains(response.Body.String(), "active managed zone limit") {
+		t.Fatalf("active limit response = %s", response.Body.String())
 	}
 }
 

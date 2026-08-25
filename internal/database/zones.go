@@ -16,12 +16,22 @@ import (
 )
 
 var (
-	ErrForbidden      = errors.New("operation is not permitted")
-	ErrInvalidInput   = errors.New("input is not valid")
-	ErrZoneNotFound   = errors.New("zone not found")
-	ErrRecordNotFound = errors.New("record not found")
-	ErrZoneConflict   = errors.New("zone changed since it was loaded")
+	ErrForbidden         = errors.New("operation is not permitted")
+	ErrInvalidInput      = errors.New("input is not valid")
+	ErrZoneNotFound      = errors.New("zone not found")
+	ErrRecordNotFound    = errors.New("record not found")
+	ErrZoneConflict      = errors.New("zone changed since it was loaded")
+	ErrZoneNotActive     = errors.New("zone must be approved before records can be added")
+	ErrZoneTotalLimit    = errors.New("owner has reached the total managed zone limit")
+	ErrZoneActiveLimit   = errors.New("owner has reached the active managed zone limit")
+	ErrZoneRejectedLimit = errors.New("owner has reached the rejected managed zone limit")
 )
+
+type ZoneLimits struct {
+	MaxTotal    int
+	MaxActive   int
+	MaxRejected int
+}
 
 type ZoneWithRecords struct {
 	Zone    Zone
@@ -35,10 +45,17 @@ type RecordInput struct {
 	TTL   uint32
 }
 
-const zoneColumns = `z.id, z.public_id, z.owner_id, z.name, z.status, z.revision, z.reviewed_by, z.reviewed_at, z.rejection_reason, z.created_at, z.updated_at`
+const zoneColumns = `z.id, z.public_id, z.owner_id, z.name, z.status, z.revision, z.reviewed_by, z.reviewed_at, COALESCE(z.review_reason, z.rejection_reason), z.created_at, z.updated_at`
+const zoneReturningColumns = `id, public_id, owner_id, name, status, revision, reviewed_by, reviewed_at, COALESCE(review_reason, rejection_reason), created_at, updated_at`
 const recordColumns = `r.id, r.public_id, r.zone_id, r.name, r.type, r.value, r.ttl, r.created_at, r.updated_at`
 
 func (s *Store) CreateZone(ctx context.Context, actor User, ownerID int64, name string) (Zone, error) {
+	return s.CreateZoneWithLimits(ctx, actor, ownerID, name, ZoneLimits{})
+}
+
+func (s *Store) CreateZoneWithLimits(ctx context.Context, actor User, ownerID int64, name string, limits ZoneLimits) (Zone, error) {
+	s.zoneMu.Lock()
+	defer s.zoneMu.Unlock()
 	name, err := normalizeZoneName(name)
 	if err != nil {
 		return Zone{}, err
@@ -55,9 +72,24 @@ func (s *Store) CreateZone(ctx context.Context, actor User, ownerID int64, name 
 		return Zone{}, fmt.Errorf("begin zone creation: %w", err)
 	}
 	defer tx.Rollback()
+	if limits.MaxTotal > 0 || limits.MaxRejected > 0 {
+		var total, rejected int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0)
+			FROM zones WHERE owner_id = ?
+		`, ownerID).Scan(&total, &rejected); err != nil {
+			return Zone{}, fmt.Errorf("count owner zones: %w", err)
+		}
+		if limits.MaxTotal > 0 && total >= limits.MaxTotal {
+			return Zone{}, ErrZoneTotalLimit
+		}
+		if limits.MaxRejected > 0 && rejected >= limits.MaxRejected {
+			return Zone{}, ErrZoneRejectedLimit
+		}
+	}
 	zone, err := scanZone(tx.QueryRowContext(ctx, `
 		INSERT INTO zones (public_id, owner_id, name) VALUES (?, ?, ?)
-		RETURNING id, public_id, owner_id, name, status, revision, reviewed_by, reviewed_at, rejection_reason, created_at, updated_at
+		RETURNING `+zoneReturningColumns+`
 	`, publicID, ownerID, name))
 	if err != nil {
 		return Zone{}, fmt.Errorf("create zone: %w", err)
@@ -113,6 +145,12 @@ func (s *Store) ZoneByPublicID(ctx context.Context, actor User, publicID string)
 }
 
 func (s *Store) ReviewZone(ctx context.Context, actor User, publicID string, status ZoneStatus, reason string, expectedRevision int64) (Zone, error) {
+	return s.ReviewZoneWithLimits(ctx, actor, publicID, status, reason, expectedRevision, ZoneLimits{})
+}
+
+func (s *Store) ReviewZoneWithLimits(ctx context.Context, actor User, publicID string, status ZoneStatus, reason string, expectedRevision int64, limits ZoneLimits) (Zone, error) {
+	s.zoneMu.Lock()
+	defer s.zoneMu.Unlock()
 	if actor.Role != RoleAdmin || !actor.Enabled {
 		return Zone{}, ErrForbidden
 	}
@@ -120,10 +158,10 @@ func (s *Store) ReviewZone(ctx context.Context, actor User, publicID string, sta
 		return Zone{}, fmt.Errorf("%w: review status must be active, rejected, or suspended", ErrInvalidInput)
 	}
 	reason = strings.TrimSpace(reason)
-	if status == ZoneRejected && reason == "" {
-		return Zone{}, fmt.Errorf("%w: rejection reason is required", ErrInvalidInput)
+	if (status == ZoneRejected || status == ZoneSuspended) && reason == "" {
+		return Zone{}, fmt.Errorf("%w: a reason is required when rejecting or suspending a zone", ErrInvalidInput)
 	}
-	if status != ZoneRejected {
+	if status == ZoneActive {
 		reason = ""
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -131,12 +169,27 @@ func (s *Store) ReviewZone(ctx context.Context, actor User, publicID string, sta
 		return Zone{}, fmt.Errorf("begin zone review: %w", err)
 	}
 	defer tx.Rollback()
+	if status == ZoneActive && limits.MaxActive > 0 {
+		var active int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM zones
+			WHERE owner_id = (SELECT owner_id FROM zones WHERE public_id = ?)
+				AND status = 'active' AND public_id <> ?
+		`, publicID, publicID).Scan(&active); err != nil {
+			return Zone{}, fmt.Errorf("count active owner zones: %w", err)
+		}
+		if active >= limits.MaxActive {
+			return Zone{}, ErrZoneActiveLimit
+		}
+	}
 	zone, err := scanZone(tx.QueryRowContext(ctx, `
 		UPDATE zones SET status = ?, revision = revision + 1, reviewed_by = ?, reviewed_at = unixepoch(),
-			rejection_reason = NULLIF(?, ''), updated_at = unixepoch()
+			rejection_reason = CASE WHEN ? = 'rejected' THEN NULLIF(?, '') ELSE NULL END,
+			review_reason = CASE WHEN ? IN ('rejected', 'suspended') THEN NULLIF(?, '') ELSE NULL END,
+			updated_at = unixepoch()
 		WHERE public_id = ? AND revision = ?
-		RETURNING id, public_id, owner_id, name, status, revision, reviewed_by, reviewed_at, rejection_reason, created_at, updated_at
-	`, status, actor.ID, reason, publicID, expectedRevision))
+		RETURNING `+zoneReturningColumns+`
+	`, status, actor.ID, status, reason, status, reason, publicID, expectedRevision))
 	if errors.Is(err, sql.ErrNoRows) {
 		var exists bool
 		if queryErr := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM zones WHERE public_id = ?)", publicID).Scan(&exists); queryErr != nil {
@@ -217,6 +270,9 @@ func (s *Store) CreateRecordAtRevision(ctx context.Context, actor User, zonePubl
 	zone, err := s.ZoneByPublicID(ctx, actor, zonePublicID)
 	if err != nil {
 		return DNSRecord{}, err
+	}
+	if zone.Status != ZoneActive {
+		return DNSRecord{}, ErrZoneNotActive
 	}
 	input, err = normalizeRecord(zone.Name, input)
 	if err != nil {
@@ -426,10 +482,23 @@ func normalizeZoneName(name string) (string, error) {
 }
 
 func normalizeRecord(zoneName string, input RecordInput) (RecordInput, error) {
-	input.Name = strings.ToLower(dns.Fqdn(strings.TrimSpace(input.Name)))
+	name := strings.ToLower(strings.TrimSpace(input.Name))
+	apex := dns.Fqdn(zoneName)
+	switch {
+	case name == "@":
+		input.Name = apex
+	case name == "":
+		return RecordInput{}, fmt.Errorf("%w: record subdomain is required", ErrInvalidInput)
+	case strings.HasSuffix(name, "."):
+		input.Name = dns.Fqdn(name)
+	case dns.IsSubDomain(apex, dns.Fqdn(name)):
+		// Preserve full names accepted by earlier API versions.
+		input.Name = dns.Fqdn(name)
+	default:
+		input.Name = dns.Fqdn(name + "." + zoneName)
+	}
 	input.Type = RecordType(strings.ToUpper(strings.TrimSpace(string(input.Type))))
 	input.Value = strings.TrimSpace(input.Value)
-	apex := dns.Fqdn(zoneName)
 	if !dns.IsSubDomain(apex, input.Name) {
 		return RecordInput{}, fmt.Errorf("%w: record name must be inside its zone", ErrInvalidInput)
 	}

@@ -78,13 +78,13 @@ func (s *Store) SessionByToken(ctx context.Context, token string) (Authenticated
 	var sessionCreated, expiresAt, lastSeenAt, userCreated, userUpdated int64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT s.id, s.user_id, s.created_at, s.expires_at, s.last_seen_at,
-			u.id, u.public_id, u.username, u.role, u.enabled, u.must_change_password, u.created_at, u.updated_at
+			u.id, u.public_id, u.username, u.email, u.role, u.enabled, u.must_change_password, u.created_at, u.updated_at
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = ? AND s.expires_at > unixepoch() AND u.enabled = 1
 	`, tokenHash[:]).Scan(
 		&result.Session.ID, &result.Session.UserID, &sessionCreated, &expiresAt, &lastSeenAt,
-		&result.User.ID, &result.User.PublicID, &result.User.Username, &result.User.Role,
+		&result.User.ID, &result.User.PublicID, &result.User.Username, &result.User.Email, &result.User.Role,
 		&result.User.Enabled, &result.User.MustChangePassword, &userCreated, &userUpdated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
