@@ -150,6 +150,7 @@ fi
 
 password_file="${LIGHTDNS_BOOTSTRAP_PASSWORD_FILE:-}"
 admin_username="${LIGHTDNS_BOOTSTRAP_ADMIN:-admin}"
+admin_email="${LIGHTDNS_BOOTSTRAP_EMAIL:-}"
 needs_bootstrap=false
 if [ ! -f "$database_file" ]; then
   needs_bootstrap=true
@@ -175,6 +176,18 @@ if [ "$needs_bootstrap" = true ] && [ -z "$password_file" ]; then
     printf 'Initial admin username [admin]: ' >/dev/tty
     IFS= read -r admin_username </dev/tty || exit 1
     admin_username="${admin_username:-admin}"
+    default_email="${admin_email:-${admin_username}@local.invalid}"
+    printf 'Initial admin email [%s]: ' "$default_email" >/dev/tty
+    IFS= read -r admin_email_input </dev/tty || exit 1
+    if [ -n "$admin_email_input" ]; then
+      admin_email="$admin_email_input"
+    elif [ -z "$admin_email" ]; then
+      admin_email="$default_email"
+    fi
+    if ! printf '%s' "$admin_email" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'; then
+      printf 'The email address is not valid.\n' >&2
+      continue
+    fi
     printf 'Initial admin password (12+ characters): ' >/dev/tty
     stty -echo </dev/tty
     IFS= read -r admin_password </dev/tty || { stty echo </dev/tty; exit 1; }
@@ -200,7 +213,7 @@ fi
 
 set -- -database "$database_file" -config "$config_file" -state "$legacy_state" -init-only
 if [ -n "$password_file" ]; then
-  set -- "$@" -bootstrap-admin "$admin_username" -bootstrap-password-file "$password_file"
+  set -- "$@" -bootstrap-admin "$admin_username" -bootstrap-email "$admin_email" -bootstrap-password-file "$password_file"
 fi
 if [ "$lock_held" = true ]; then
   export LIGHTDNS_DATABASE_LOCK_FD=9

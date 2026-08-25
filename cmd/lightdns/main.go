@@ -32,6 +32,7 @@ func main() {
 	statePath := flag.String("state", "lightdns.state.yaml", "legacy dashboard YAML to import when initializing")
 	databasePath := flag.String("database", "lightdns.db", "path to the SQLite database")
 	bootstrapAdmin := flag.String("bootstrap-admin", "admin", "initial administrator username")
+	bootstrapEmail := flag.String("bootstrap-email", "", "initial administrator email")
 	bootstrapPasswordFile := flag.String("bootstrap-password-file", "", "file containing the initial administrator password")
 	initOnly := flag.Bool("init-only", false, "initialize or migrate the database and exit")
 	userCountOnly := flag.Bool("user-count-only", false, "print the number of users and exit")
@@ -84,7 +85,7 @@ func main() {
 		fmt.Println(count)
 		return
 	}
-	cfg, revision, err := initializeRuntime(ctx, db, *configPath, *statePath, *bootstrapAdmin, *bootstrapPasswordFile)
+	cfg, revision, err := initializeRuntime(ctx, db, *configPath, *statePath, *bootstrapAdmin, *bootstrapEmail, *bootstrapPasswordFile)
 	if err != nil {
 		slog.Error("runtime initialization failed", "error", err)
 		os.Exit(1)
@@ -284,7 +285,7 @@ func acquireDatabaseLock(path string) (*os.File, error) {
 	return lock, nil
 }
 
-func initializeRuntime(ctx context.Context, db *database.Store, configPath, statePath, adminUsername, passwordFile string) (config.Config, int64, error) {
+func initializeRuntime(ctx context.Context, db *database.Store, configPath, statePath, adminUsername, adminEmail, passwordFile string) (config.Config, int64, error) {
 	cfg, revision, found, err := db.LoadConfig(ctx)
 	if err != nil {
 		return config.Config{}, 0, fmt.Errorf("load stored configuration: %w", err)
@@ -324,7 +325,7 @@ func initializeRuntime(ctx context.Context, db *database.Store, configPath, stat
 			return config.Config{}, 0, fmt.Errorf("read bootstrap password: %w", err)
 		}
 		password := strings.TrimRight(string(passwordBytes), "\r\n")
-		if _, err := db.CreateUser(ctx, database.CreateUserParams{Username: adminUsername, Password: password, Role: database.RoleAdmin}); err != nil {
+		if _, err := db.CreateUser(ctx, database.CreateUserParams{Username: adminUsername, Email: adminEmail, Password: password, Role: database.RoleAdmin}); err != nil {
 			if imported {
 				_ = db.DiscardConfig(ctx, revision)
 			}

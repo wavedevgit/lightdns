@@ -31,7 +31,7 @@ func TestInitializeRuntimeImportsOnceAndBootstrapsAdmin(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	cfg, revision, err := initializeRuntime(t.Context(), store, basePath, statePath, "admin", passwordPath)
+	cfg, revision, err := initializeRuntime(t.Context(), store, basePath, statePath, "admin", "admin@example.test", passwordPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestInitializeRuntimeImportsOnceAndBootstrapsAdmin(t *testing.T) {
 	if err := os.WriteFile(statePath, []byte("listen: 127.0.0.1:9999\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, revision, err = initializeRuntime(t.Context(), store, basePath, statePath, "ignored", "")
+	cfg, revision, err = initializeRuntime(t.Context(), store, basePath, statePath, "ignored", "", "")
 	if err != nil || cfg.Listen != "127.0.0.1:5353" || revision != 1 {
 		t.Fatalf("reloaded config listen=%q revision=%d err=%v", cfg.Listen, revision, err)
 	}
@@ -61,7 +61,7 @@ func TestInitializeRuntimeRequiresAdminForManagement(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if _, _, err := initializeRuntime(t.Context(), store, configPath, "", "admin", ""); err == nil {
+	if _, _, err := initializeRuntime(t.Context(), store, configPath, "", "admin", "", ""); err == nil {
 		t.Fatal("management initialized without an administrator")
 	}
 }
