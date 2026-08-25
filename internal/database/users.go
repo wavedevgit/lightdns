@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/mail"
 	"regexp"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ const dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=2$AAAAAAAAAAAAAAAAAAAAAA
 
 type CreateUserParams struct {
 	Username           string
+	Email              string
 	Password           string
 	Role               UserRole
 	MustChangePassword bool
@@ -38,7 +40,7 @@ func (s *Store) UserCount(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-const userColumns = `id, public_id, username, password_hash, role, enabled, must_change_password, created_at, updated_at`
+const userColumns = `id, public_id, username, email, password_hash, role, enabled, must_change_password, deleted_at, created_at, updated_at`
 
 func (s *Store) CreateUser(ctx context.Context, input CreateUserParams) (User, error) {
 	publicID, passwordHash, err := prepareUser(input)
@@ -83,6 +85,9 @@ func prepareUser(input CreateUserParams) (string, string, error) {
 	if input.Role != RoleAdmin && input.Role != RoleUser {
 		return "", "", fmt.Errorf("%w: user role must be admin or user", ErrInvalidInput)
 	}
+	if _, err := normalizeUserEmail(input.Username, input.Email); err != nil {
+		return "", "", err
+	}
 	passwordHash, err := passwordauth.HashPassword(input.Password)
 	if err != nil {
 		return "", "", err
@@ -100,12 +105,13 @@ type userQueryer interface {
 
 func insertUser(ctx context.Context, queryer userQueryer, input CreateUserParams, publicID, passwordHash string) (User, error) {
 	input.Username = strings.TrimSpace(input.Username)
+	input.Email, _ = normalizeUserEmail(input.Username, input.Email)
 	row := queryer.QueryRowContext(ctx, `
-		INSERT INTO users (public_id, username, password_hash, role, must_change_password)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO users (public_id, username, email, password_hash, role, must_change_password)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (username) DO NOTHING
 		RETURNING `+userColumns,
-		publicID, input.Username, passwordHash, input.Role, input.MustChangePassword)
+		publicID, input.Username, input.Email, passwordHash, input.Role, input.MustChangePassword)
 	user, err := scanUser(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrUsernameTaken
@@ -116,19 +122,61 @@ func insertUser(ctx context.Context, queryer userQueryer, input CreateUserParams
 	return user, nil
 }
 
-func (s *Store) UpdateUserAudited(ctx context.Context, actor User, publicID string, role *UserRole, enabled *bool) (User, error) {
-	if role == nil && enabled == nil {
-		return User{}, fmt.Errorf("%w: role or enabled is required", ErrInvalidInput)
+func normalizeUserEmail(username, email string) (string, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return strings.ToLower(strings.TrimSpace(username)) + "@local.invalid", nil
+	}
+	address, err := mail.ParseAddress(email)
+	if err != nil || address.Address != email || len(email) > 254 {
+		return "", fmt.Errorf("%w: email address is not valid", ErrInvalidInput)
+	}
+	return email, nil
+}
+
+func (s *Store) UpdateUserAudited(ctx context.Context, actor User, publicID string, username, email *string, role *UserRole, enabled *bool) (User, error) {
+	if username == nil && email == nil && role == nil && enabled == nil {
+		return User{}, fmt.Errorf("%w: at least one user field is required", ErrInvalidInput)
 	}
 	if role != nil && *role != RoleAdmin && *role != RoleUser {
 		return User{}, fmt.Errorf("%w: user role must be admin or user", ErrInvalidInput)
+	}
+	if username != nil {
+		trimmed := strings.TrimSpace(*username)
+		if !usernamePattern.MatchString(trimmed) {
+			return User{}, fmt.Errorf("%w: username must contain 3 to 64 letters, numbers, dots, underscores, or hyphens", ErrInvalidInput)
+		}
+		username = &trimmed
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return User{}, fmt.Errorf("begin user update: %w", err)
 	}
 	defer tx.Rollback()
-	var roleValue, enabledValue any
+	current, err := storedUser(tx.QueryRowContext(ctx, "SELECT "+userColumns+" FROM users WHERE public_id = ? AND deleted_at IS NULL", publicID))
+	if err != nil {
+		return User{}, err
+	}
+	effectiveUsername := current.Username
+	var usernameValue, emailValue, roleValue, enabledValue any
+	if username != nil {
+		var taken bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE username = ? AND public_id <> ?)", *username, publicID).Scan(&taken); err != nil {
+			return User{}, fmt.Errorf("check username availability: %w", err)
+		}
+		if taken {
+			return User{}, ErrUsernameTaken
+		}
+		usernameValue = *username
+		effectiveUsername = *username
+	}
+	if email != nil {
+		normalized, err := normalizeUserEmail(effectiveUsername, *email)
+		if err != nil {
+			return User{}, err
+		}
+		emailValue = normalized
+	}
 	if role != nil {
 		roleValue = *role
 	}
@@ -136,18 +184,52 @@ func (s *Store) UpdateUserAudited(ctx context.Context, actor User, publicID stri
 		enabledValue = *enabled
 	}
 	user, err := storedUser(tx.QueryRowContext(ctx, `
-		UPDATE users SET role = COALESCE(?, role), enabled = COALESCE(?, enabled), updated_at = unixepoch()
-		WHERE public_id = ? RETURNING `+userColumns, roleValue, enabledValue, publicID))
+		UPDATE users SET username = COALESCE(?, username), email = COALESCE(?, email),
+			role = COALESCE(?, role), enabled = COALESCE(?, enabled), updated_at = unixepoch()
+		WHERE public_id = ? AND deleted_at IS NULL RETURNING `+userColumns, usernameValue, emailValue, roleValue, enabledValue, publicID))
 	if err != nil {
 		return User{}, err
 	}
-	if err := appendAudit(ctx, tx, actor.ID, "user.update", "user", publicID, map[string]any{"role": role, "enabled": enabled}); err != nil {
+	if err := appendAudit(ctx, tx, actor.ID, "user.update", "user", publicID, map[string]any{"username": username, "email": email, "role": role, "enabled": enabled}); err != nil {
 		return User{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return User{}, fmt.Errorf("commit user update: %w", err)
 	}
 	return sanitizedUser(user), nil
+}
+
+func (s *Store) DeleteUserAudited(ctx context.Context, actor User, publicID string) error {
+	if actor.PublicID == publicID {
+		return ErrForbidden
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin user deletion: %w", err)
+	}
+	defer tx.Rollback()
+	user, err := storedUser(tx.QueryRowContext(ctx, "SELECT "+userColumns+" FROM users WHERE public_id = ? AND deleted_at IS NULL", publicID))
+	if err != nil {
+		return err
+	}
+	tombstone := "deleted-" + user.PublicID
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE users SET username = ?, email = ?, role = 'user', enabled = 0,
+			must_change_password = 0, deleted_at = unixepoch(), updated_at = unixepoch()
+		WHERE id = ?
+	`, tombstone, tombstone+"@local.invalid", user.ID); err != nil {
+		return fmt.Errorf("delete user: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE user_id = ?", user.ID); err != nil {
+		return fmt.Errorf("delete user sessions: %w", err)
+	}
+	if err := appendAudit(ctx, tx, actor.ID, "user.delete", "user", publicID, nil); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit user deletion: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) ResetPasswordAudited(ctx context.Context, actor User, publicID, password string, mustChange bool) (User, error) {
@@ -176,7 +258,7 @@ func (s *Store) ResetPasswordAudited(ctx context.Context, actor User, publicID, 
 }
 
 func (s *Store) UserByPublicID(ctx context.Context, publicID string) (User, error) {
-	user, err := storedUser(s.db.QueryRowContext(ctx, "SELECT "+userColumns+" FROM users WHERE public_id = ?", publicID))
+	user, err := storedUser(s.db.QueryRowContext(ctx, "SELECT "+userColumns+" FROM users WHERE public_id = ? AND deleted_at IS NULL", publicID))
 	return sanitizedUser(user), err
 }
 
@@ -186,12 +268,12 @@ func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 }
 
 func (s *Store) UserByUsername(ctx context.Context, username string) (User, error) {
-	user, err := storedUser(s.db.QueryRowContext(ctx, "SELECT "+userColumns+" FROM users WHERE username = ?", strings.TrimSpace(username)))
+	user, err := storedUser(s.db.QueryRowContext(ctx, "SELECT "+userColumns+" FROM users WHERE username = ? AND deleted_at IS NULL", strings.TrimSpace(username)))
 	return sanitizedUser(user), err
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+userColumns+" FROM users ORDER BY username COLLATE NOCASE")
+	rows, err := s.db.QueryContext(ctx, "SELECT "+userColumns+" FROM users WHERE deleted_at IS NULL ORDER BY username COLLATE NOCASE")
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -211,7 +293,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 }
 
 func (s *Store) authenticateUser(ctx context.Context, username, password string) (User, error) {
-	user, err := storedUser(s.db.QueryRowContext(ctx, "SELECT "+userColumns+" FROM users WHERE username = ?", strings.TrimSpace(username)))
+	user, err := storedUser(s.db.QueryRowContext(ctx, "SELECT "+userColumns+" FROM users WHERE username = ? AND deleted_at IS NULL", strings.TrimSpace(username)))
 	if errors.Is(err, ErrUserNotFound) {
 		_, _ = passwordauth.VerifyPassword(dummyPasswordHash, password)
 		return User{}, ErrInvalidCredentials
@@ -327,11 +409,16 @@ func updateUser(row rowScanner) (User, error) {
 
 func scanUser(row rowScanner) (User, error) {
 	var user User
+	var deletedAt sql.NullInt64
 	var createdAt, updatedAt int64
 	err := row.Scan(
-		&user.ID, &user.PublicID, &user.Username, &user.PasswordHash, &user.Role, &user.Enabled,
-		&user.MustChangePassword, &createdAt, &updatedAt,
+		&user.ID, &user.PublicID, &user.Username, &user.Email, &user.PasswordHash, &user.Role, &user.Enabled,
+		&user.MustChangePassword, &deletedAt, &createdAt, &updatedAt,
 	)
+	if deletedAt.Valid {
+		value := time.Unix(deletedAt.Int64, 0).UTC()
+		user.DeletedAt = &value
+	}
 	user.CreatedAt = time.Unix(createdAt, 0).UTC()
 	user.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return user, err

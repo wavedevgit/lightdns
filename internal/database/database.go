@@ -8,14 +8,16 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 6
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	zoneMu sync.Mutex
 }
 
 var migrations = [CurrentSchemaVersion][]string{
@@ -28,6 +30,15 @@ var migrations = [CurrentSchemaVersion][]string{
 	},
 	{`ALTER TABLE settings ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`},
 	coreModelsMigration,
+	{
+		`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT 'unset@local.invalid' CHECK (length(email) BETWEEN 3 AND 254 AND email = trim(email))`,
+		`UPDATE users SET email = lower(username) || '@local.invalid'`,
+	},
+	{`ALTER TABLE users ADD COLUMN deleted_at INTEGER`},
+	{
+		`ALTER TABLE zones ADD COLUMN review_reason TEXT CHECK (review_reason IS NULL OR length(trim(review_reason)) > 0)`,
+		`UPDATE zones SET review_reason = rejection_reason WHERE rejection_reason IS NOT NULL`,
+	},
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {

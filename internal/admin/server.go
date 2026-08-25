@@ -81,6 +81,7 @@ func NewServer(controller *Controller, dnsResolver *resolver.Resolver) http.Hand
 	mux.HandleFunc("GET /app.js", server.authenticated(server.webFile("app.js", "text/javascript; charset=utf-8")))
 	mux.HandleFunc("GET /app.css", server.authenticated(server.webFile("app.css", "text/css; charset=utf-8")))
 	mux.HandleFunc("GET /pico.min.css", server.authenticated(server.webFile("pico.min.css", "text/css; charset=utf-8")))
+	mux.HandleFunc("GET /material-symbols-rounded.woff2", server.authenticated(server.webFile("material-symbols-rounded.woff2", "font/woff2")))
 	return SecurityHeaders(mux)
 }
 
@@ -354,6 +355,11 @@ func setSessionCookie(w http.ResponseWriter, request *http.Request, token string
 }
 
 func sameOriginLogin(request *http.Request) bool {
+	// Reverse proxies can rewrite the backend-visible host. Browsers set this
+	// forbidden request header from the public origin, so it remains CSRF-safe.
+	if strings.EqualFold(request.Header.Get("Sec-Fetch-Site"), "same-origin") {
+		return true
+	}
 	source := request.Header.Get("Origin")
 	if source == "" {
 		source = request.Header.Get("Referer")

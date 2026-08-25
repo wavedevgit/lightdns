@@ -21,6 +21,19 @@ import (
 	"lightdns/internal/resolver"
 )
 
+func TestSameOriginLoginBehindReverseProxy(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "http://internal:8080/login", nil)
+	request.Header.Set("Origin", "https://dns.example.com")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	if !sameOriginLogin(request) {
+		t.Fatal("same-origin browser request behind a reverse proxy was rejected")
+	}
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+	if sameOriginLogin(request) {
+		t.Fatal("cross-site browser request was accepted")
+	}
+}
+
 func TestPersistentDashboardSessionLifecycle(t *testing.T) {
 	handler, controller, _, _ := newTestAdminServer(t)
 	request := httptest.NewRequest(http.MethodGet, "/api/config", nil)
@@ -93,7 +106,7 @@ func TestPersistentDashboardSessionLifecycle(t *testing.T) {
 func TestManagementAPIAndAuthoritativeReload(t *testing.T) {
 	handler, _, _, dnsResolver := newTestAdminServer(t)
 	adminCookie := loginCookie(t, handler, "admin", "correct horse battery staple")
-	userBody := `{"username":"alice","password":"alice secure password","role":"user","must_change_password":false}`
+	userBody := `{"username":"alice","email":"alice@example.test","password":"alice secure password","role":"user","must_change_password":false}`
 	response := apiRequest(t, handler, http.MethodPost, "/api/users", userBody, adminCookie)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create user status=%d body=%s", response.Code, response.Body.String())
@@ -115,19 +128,21 @@ func TestManagementAPIAndAuthoritativeReload(t *testing.T) {
 		t.Fatalf("created zone = %+v", zone)
 	}
 	response = apiRequestAtRevision(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/records", `{"name":"www.example.test.","type":"A","value":"192.0.2.8","ttl":300}`, userCookie, zone.Revision)
-	if response.Code != http.StatusCreated {
-		t.Fatalf("create record status=%d body=%s", response.Code, response.Body.String())
-	}
-	response = apiRequest(t, handler, http.MethodGet, "/api/zones/"+zone.ID, "", userCookie)
-	if err := json.Unmarshal(response.Body.Bytes(), &zone); err != nil {
-		t.Fatal(err)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("pending record status=%d body=%s", response.Code, response.Body.String())
 	}
 	review := `{"status":"active","reason":"","revision":` + strconv.FormatInt(zone.Revision, 10) + `}`
 	response = apiRequest(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/review", review, adminCookie)
 	if response.Code != http.StatusOK {
 		t.Fatalf("review zone status=%d body=%s", response.Code, response.Body.String())
 	}
-
+	if err := json.Unmarshal(response.Body.Bytes(), &zone); err != nil {
+		t.Fatal(err)
+	}
+	response = apiRequestAtRevision(t, handler, http.MethodPost, "/api/zones/"+zone.ID+"/records", `{"name":"www.example.test.","type":"A","value":"192.0.2.8","ttl":300}`, userCookie, zone.Revision)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create record status=%d body=%s", response.Code, response.Body.String())
+	}
 	query := new(dns.Msg)
 	query.SetQuestion("www.example.test.", dns.TypeA)
 	writer := &testDNSWriter{}

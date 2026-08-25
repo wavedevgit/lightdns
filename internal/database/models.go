@@ -39,10 +39,12 @@ type User struct {
 	ID                 int64
 	PublicID           string
 	Username           string
+	Email              string
 	PasswordHash       string `json:"-"`
 	Role               UserRole
 	Enabled            bool
 	MustChangePassword bool
+	DeletedAt          *time.Time
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }

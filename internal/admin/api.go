@@ -17,6 +17,7 @@ import (
 type userView struct {
 	ID                 string            `json:"id"`
 	Username           string            `json:"username"`
+	Email              string            `json:"email"`
 	Role               database.UserRole `json:"role"`
 	Enabled            bool              `json:"enabled"`
 	MustChangePassword bool              `json:"must_change_password"`
@@ -31,6 +32,7 @@ type zoneView struct {
 	Status          database.ZoneStatus `json:"status"`
 	Revision        int64               `json:"revision"`
 	RejectionReason *string             `json:"rejection_reason,omitempty"`
+	AppealEmail     string              `json:"appeal_email,omitempty"`
 	CreatedAt       time.Time           `json:"created_at"`
 	UpdatedAt       time.Time           `json:"updated_at"`
 }
@@ -60,7 +62,7 @@ func (s *Server) registerManagementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/users", s.adminOnly(s.createUser))
 	mux.HandleFunc("GET /api/users/{userID}", s.adminOnly(s.getUser))
 	mux.HandleFunc("PATCH /api/users/{userID}", s.adminOnly(s.updateUser))
-	mux.HandleFunc("DELETE /api/users/{userID}", s.adminOnly(s.disableUser))
+	mux.HandleFunc("DELETE /api/users/{userID}", s.adminOnly(s.deleteUser))
 	mux.HandleFunc("POST /api/users/{userID}/password-reset", s.adminOnly(s.resetUserPassword))
 	mux.HandleFunc("GET /api/zones", s.authenticated(s.listZones))
 	mux.HandleFunc("POST /api/zones", s.authenticated(s.createZone))
@@ -90,6 +92,7 @@ func (s *Server) listUsers(w http.ResponseWriter, request *http.Request) {
 func (s *Server) createUser(w http.ResponseWriter, request *http.Request) {
 	var input struct {
 		Username           string            `json:"username"`
+		Email              string            `json:"email"`
 		Password           string            `json:"password"`
 		Role               database.UserRole `json:"role"`
 		MustChangePassword bool              `json:"must_change_password"`
@@ -99,9 +102,13 @@ func (s *Server) createUser(w http.ResponseWriter, request *http.Request) {
 		writeError(w, http.StatusBadRequest, "User request is not valid JSON.")
 		return
 	}
+	if strings.TrimSpace(input.Email) == "" {
+		writeError(w, http.StatusBadRequest, "Email is required.")
+		return
+	}
 	actor := currentPrincipal(request).User
 	user, err := s.database.CreateUserAudited(request.Context(), actor, database.CreateUserParams{
-		Username: input.Username, Password: input.Password, Role: input.Role, MustChangePassword: input.MustChangePassword,
+		Username: input.Username, Email: input.Email, Password: input.Password, Role: input.Role, MustChangePassword: input.MustChangePassword,
 	})
 	if err != nil {
 		writeDatabaseError(w, err)
@@ -122,16 +129,18 @@ func (s *Server) getUser(w http.ResponseWriter, request *http.Request) {
 func (s *Server) updateUser(w http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(w, request.Body, 64<<10)
 	var input struct {
-		Role    *database.UserRole `json:"role"`
-		Enabled *bool              `json:"enabled"`
+		Username *string            `json:"username"`
+		Email    *string            `json:"email"`
+		Role     *database.UserRole `json:"role"`
+		Enabled  *bool              `json:"enabled"`
 	}
-	if err := decodeJSON(request.Body, &input); err != nil || (input.Role == nil && input.Enabled == nil) {
+	if err := decodeJSON(request.Body, &input); err != nil || (input.Username == nil && input.Email == nil && input.Role == nil && input.Enabled == nil) {
 		writeError(w, http.StatusBadRequest, "User update is not valid JSON.")
 		return
 	}
 	publicID := request.PathValue("userID")
 	actor := currentPrincipal(request).User
-	user, err := s.database.UpdateUserAudited(request.Context(), actor, publicID, input.Role, input.Enabled)
+	user, err := s.database.UpdateUserAudited(request.Context(), actor, publicID, input.Username, input.Email, input.Role, input.Enabled)
 	if err != nil {
 		writeDatabaseError(w, err)
 		return
@@ -139,16 +148,15 @@ func (s *Server) updateUser(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, userResponse(user))
 }
 
-func (s *Server) disableUser(w http.ResponseWriter, request *http.Request) {
+func (s *Server) deleteUser(w http.ResponseWriter, request *http.Request) {
 	publicID := request.PathValue("userID")
 	actor := currentPrincipal(request).User
-	enabled := false
-	user, err := s.database.UpdateUserAudited(request.Context(), actor, publicID, nil, &enabled)
+	err := s.database.DeleteUserAudited(request.Context(), actor, publicID)
 	if err != nil {
 		writeDatabaseError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, userResponse(user))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) resetUserPassword(w http.ResponseWriter, request *http.Request) {
@@ -214,7 +222,9 @@ func (s *Server) createZone(w http.ResponseWriter, request *http.Request) {
 			return
 		}
 	}
-	zone, err := s.database.CreateZone(request.Context(), actor, owner.ID, input.Name)
+	configuredLimits := s.controller.Snapshot().EffectiveZoneLimits()
+	limits := database.ZoneLimits{MaxTotal: configuredLimits.MaxTotalPerUser, MaxActive: configuredLimits.MaxActivePerUser, MaxRejected: configuredLimits.MaxRejectedPerUser}
+	zone, err := s.database.CreateZoneWithLimits(request.Context(), actor, owner.ID, input.Name, limits)
 	if err != nil {
 		writeDatabaseError(w, err)
 		return
@@ -252,7 +262,9 @@ func (s *Server) reviewZone(w http.ResponseWriter, request *http.Request) {
 		writeError(w, http.StatusBadRequest, "Zone review is not valid JSON.")
 		return
 	}
-	zone, err := s.database.ReviewZone(request.Context(), currentPrincipal(request).User, request.PathValue("zoneID"), input.Status, input.Reason, input.Revision)
+	configuredLimits := s.controller.Snapshot().EffectiveZoneLimits()
+	limits := database.ZoneLimits{MaxTotal: configuredLimits.MaxTotalPerUser, MaxActive: configuredLimits.MaxActivePerUser, MaxRejected: configuredLimits.MaxRejectedPerUser}
+	zone, err := s.database.ReviewZoneWithLimits(request.Context(), currentPrincipal(request).User, request.PathValue("zoneID"), input.Status, input.Reason, input.Revision, limits)
 	if err != nil {
 		writeDatabaseError(w, err)
 		return
@@ -390,13 +402,14 @@ func (s *Server) zoneResponse(request *http.Request, zone database.Zone) (zoneVi
 	}
 	return zoneView{
 		ID: zone.PublicID, OwnerID: owner.PublicID, Name: zone.Name, Status: zone.Status, Revision: zone.Revision,
-		RejectionReason: zone.RejectionReason, CreatedAt: zone.CreatedAt, UpdatedAt: zone.UpdatedAt,
+		RejectionReason: zone.RejectionReason, AppealEmail: s.controller.Snapshot().EffectiveZoneLimits().AppealEmail,
+		CreatedAt: zone.CreatedAt, UpdatedAt: zone.UpdatedAt,
 	}, nil
 }
 
 func userResponse(user database.User) userView {
 	return userView{
-		ID: user.PublicID, Username: user.Username, Role: user.Role, Enabled: user.Enabled,
+		ID: user.PublicID, Username: user.Username, Email: user.Email, Role: user.Role, Enabled: user.Enabled,
 		MustChangePassword: user.MustChangePassword, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt,
 	}
 }
@@ -418,6 +431,14 @@ func writeDatabaseError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "Resource was not found.")
 	case errors.Is(err, database.ErrUsernameTaken), errors.Is(err, database.ErrZoneConflict), errors.Is(err, database.ErrUserChanged), strings.Contains(err.Error(), "constraint failed"):
 		writeError(w, http.StatusConflict, "The requested change conflicts with existing data or a newer update.")
+	case errors.Is(err, database.ErrZoneNotActive):
+		writeError(w, http.StatusConflict, "Zone must be approved before records can be added.")
+	case errors.Is(err, database.ErrZoneTotalLimit):
+		writeError(w, http.StatusConflict, "This owner has reached the total managed zone limit.")
+	case errors.Is(err, database.ErrZoneActiveLimit):
+		writeError(w, http.StatusConflict, "This owner has reached the active managed zone limit.")
+	case errors.Is(err, database.ErrZoneRejectedLimit):
+		writeError(w, http.StatusConflict, "This owner has reached the rejected zone limit and cannot request another zone.")
 	case errors.Is(err, database.ErrInvalidInput):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, passwordauth.ErrPasswordTooShort), errors.Is(err, passwordauth.ErrPasswordTooLong), errors.Is(err, passwordauth.ErrInvalidPassword):

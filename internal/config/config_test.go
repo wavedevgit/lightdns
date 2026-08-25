@@ -54,3 +54,26 @@ func TestSettingsValidationDoesNotRequireLegacyToken(t *testing.T) {
 		t.Fatal("settings validation accepted non-loopback plaintext HTTP")
 	}
 }
+
+func TestZoneLimits(t *testing.T) {
+	cfg := Default()
+	if limits := cfg.EffectiveZoneLimits(); limits.MaxTotalPerUser != 25 || limits.MaxActivePerUser != 10 || limits.MaxRejectedPerUser != 10 {
+		t.Fatalf("default zone limits = %+v", limits)
+	}
+	cfg.ZoneLimits = nil
+	if err := cfg.ValidateSettings(); err != nil {
+		t.Fatalf("legacy configuration without zone limits was rejected: %v", err)
+	}
+	cfg.ZoneLimits = &ZoneLimitsConfig{MaxTotalPerUser: 5, MaxActivePerUser: 6, MaxRejectedPerUser: 2}
+	if err := cfg.ValidateSettings(); err == nil {
+		t.Fatal("active zone limit above total was accepted")
+	}
+	cfg.ZoneLimits = &ZoneLimitsConfig{MaxTotalPerUser: 5, MaxActivePerUser: 3, MaxRejectedPerUser: 0}
+	if err := cfg.ValidateSettings(); err == nil {
+		t.Fatal("non-positive rejected zone limit was accepted")
+	}
+	cfg.ZoneLimits = &ZoneLimitsConfig{MaxTotalPerUser: 5, MaxActivePerUser: 3, MaxRejectedPerUser: 2, AppealEmail: "not-an-email"}
+	if err := cfg.ValidateSettings(); err == nil {
+		t.Fatal("invalid appeal email was accepted")
+	}
+}
