@@ -6,16 +6,35 @@ A small DNS blocker, cache, and authoritative zone manager with a web dashboard.
 
 ## Install
 
+Download the latest release from [GitHub Releases](https://github.com/wavedevgit/lightdns/releases):
+
+```sh
+# amd64
+curl -LO https://github.com/wavedevgit/lightdns/releases/latest/download/lightdns-linux-amd64.tar.gz
+curl -LO https://github.com/wavedevgit/lightdns/releases/latest/download/lightdns-linux-amd64.tar.gz.sha256
+sha256sum -c lightdns-linux-amd64.tar.gz.sha256
+tar -xzf lightdns-linux-amd64.tar.gz
+cd lightdns-linux-amd64
+sudo ./install.sh
+lightdns-run
+
+# arm64: use lightdns-linux-arm64.tar.gz
+```
+
+Dashboard: `http://127.0.0.1:8080`
+
+<details>
+<summary>Build from source</summary>
+
 ```sh
 git clone https://github.com/wavedevgit/lightdns.git
 cd lightdns
-git checkout v2
 ./build.sh
 sudo ./install.sh
 lightdns-run
 ```
 
-Dashboard: `http://127.0.0.1:8080`
+</details>
 
 ## Test DNS
 
